@@ -30,6 +30,7 @@ async function logActivity(db, type, label, detail) {
 const TG_TOKEN = process.env.TG_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim());
 const chatHistory = {};
+const pendingState = {}; // يحفظ الـ state لكل chat
 
 async function sendTG(chatId, text) {
   await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -469,6 +470,130 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ══ PENDING STATE HANDLER ══
+  if (pendingState[chatId]) {
+    const state = pendingState[chatId];
+    delete pendingState[chatId];
+
+    // await_offer_expiry — ستنى تاريخ العرض
+    if (state.type === "await_offer_expiry") {
+      const db = getDB();
+      let expiry = "";
+      const isMaftooh = text.match(/مفتوح|مش محدد|بدون|بلا تاريخ|open|no date/i);
+      if (!isMaftooh) {
+        const dateMatch = text.match(/([\d]{4}[-\/][\d]{1,2}[-\/][\d]{1,2})/);
+        if (dateMatch) expiry = dateMatch[1].replace(/\//g, "-");
+        else {
+          // مش فاهم الرد — اسأل تاني
+          pendingState[chatId] = state;
+          await sendTG(chatId, `مش فاهم التاريخ 😅\nابعت بالشكل ده: 2025-12-31\nأو قول "مفتوح" لو مش محدد`);
+          return res.status(200).send("ok");
+        }
+      }
+      const id = "off_" + Date.now();
+      await db.collection("offers").doc(id).set({
+        id, accountId: state.accId, title: state.title,
+        description: "", content: "", image: "", link: "",
+        expiryDate: expiry, badge: "جديد",
+        updatedAt: new Date().toISOString()
+      });
+      await sendTG(chatId, `✅ تم إضافة العرض!\nالأكونت: ${state.accName}\nالعنوان: ${state.title}\n${expiry ? "ينتهي: "+expiry : "⏳ مفتوح — بدون تاريخ انتهاء"}`);
+      return res.status(200).send("ok");
+    }
+
+    // await_acc_for_reply — ستنى اسم الأكونت لإضافة رد
+    if (state.type === "await_acc_for_reply") {
+      const db = getDB();
+      const snap = await db.collection("accounts").get();
+      const accs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const acc = accs.find(a => a.name === text.trim()) || accs.find(a => a.name.includes(text.trim()) || text.trim().includes(a.name));
+      if (!acc) {
+        pendingState[chatId] = state;
+        await sendTG(chatId, `❌ مش لاقي أكونت "${text}"\nالأكونتات:\n` + accs.map(a => `• ${a.name}`).join("\n"));
+        return res.status(200).send("ok");
+      }
+      const replies = (acc.extraReplies || []).concat([{ label: state.label, text: state.replyText }]);
+      await db.collection("accounts").doc(acc.id).update({ extraReplies: replies, updatedAt: new Date().toISOString() });
+      await sendTG(chatId, `✅ تم إضافة الرد!\nالأكونت: ${acc.name}\nالاسم: ${state.label}\nالنص: ${state.replyText}`);
+      return res.status(200).send("ok");
+    }
+
+    // await_acc_for_offer — ستنى اسم الأكونت لإضافة عرض
+    if (state.type === "await_acc_for_offer") {
+      const db = getDB();
+      const snap = await db.collection("accounts").get();
+      const accs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const acc = accs.find(a => a.name === text.trim()) || accs.find(a => a.name.includes(text.trim()) || text.trim().includes(a.name));
+      if (!acc) {
+        pendingState[chatId] = state;
+        await sendTG(chatId, `❌ مش لاقي "${text}"\nاختار من:\n` + accs.map(a => `• ${a.name}`).join("\n"));
+        return res.status(200).send("ok");
+      }
+      pendingState[chatId] = { type: "await_offer_expiry", accId: acc.id, accName: acc.name, title: state.title };
+      await sendTG(chatId, `📅 العرض "${state.title}" لـ ${acc.name}\nينتهي امتى؟ (YYYY-MM-DD) أو قول "مفتوح"`);
+      return res.status(200).send("ok");
+    }
+
+    // await_offer_title — ستنى عنوان العرض
+    if (state.type === "await_offer_title") {
+      const title = text.trim();
+      if (!title) { pendingState[chatId] = state; await sendTG(chatId, "اكتب عنوان العرض:"); return res.status(200).send("ok"); }
+      pendingState[chatId] = { type: "await_offer_expiry", accId: state.accId, accName: state.accName, title };
+      await sendTG(chatId, `📅 العرض "${title}" لـ ${state.accName}\nينتهي امتى؟ (YYYY-MM-DD) أو قول "مفتوح"`);
+      return res.status(200).send("ok");
+    }
+
+    // await_reply_label — ستنى اسم الرد
+    if (state.type === "await_reply_label") {
+      const label = text.trim();
+      if (!label) { pendingState[chatId] = state; await sendTG(chatId, "اكتب اسم الرد (هيبان كعنوان الزرار):"); return res.status(200).send("ok"); }
+      pendingState[chatId] = { type: "await_reply_text", accId: state.accId, accName: state.accName, label };
+      await sendTG(chatId, `✏️ تمام! دلوقتي اكتب نص الرد لـ "${label}":`);
+      return res.status(200).send("ok");
+    }
+
+    // await_reply_text — ستنى نص الرد
+    if (state.type === "await_reply_text") {
+      const replyText = text.trim();
+      if (!replyText) { pendingState[chatId] = state; await sendTG(chatId, "اكتب نص الرد:"); return res.status(200).send("ok"); }
+      const db = getDB();
+      const snap = await db.collection("accounts").doc(state.accId).get();
+      const acc = snap.data();
+      const replies = (acc.extraReplies || []).concat([{ label: state.label, text: replyText }]);
+      await db.collection("accounts").doc(state.accId).update({ extraReplies: replies, updatedAt: new Date().toISOString() });
+      await sendTG(chatId, `✅ تم إضافة الرد!\nالأكونت: ${state.accName}\nالاسم: ${state.label}\nالنص: ${replyText}`);
+      return res.status(200).send("ok");
+    }
+
+    // await_fixed_reply_text — ستنى نص الرد الثابت
+    if (state.type === "await_fixed_reply_text") {
+      const newFixed = text.trim();
+      const isMaftooh = newFixed.match(/امسح|احذف|مسح|فاضي|بدون|بلا/i);
+      const db = getDB();
+      await db.collection("accounts").doc(state.accId).update({ fixedReply: isMaftooh ? "" : newFixed, updatedAt: new Date().toISOString() });
+      await sendTG(chatId, isMaftooh ? `✅ تم مسح الرد الثابت من ${state.accName}` : `✅ تم تعديل الرد الثابت لـ ${state.accName}`);
+      return res.status(200).send("ok");
+    }
+
+    // await_times_text — ستنى نص المواعيد
+    if (state.type === "await_times_text") {
+      const newTimes = text.trim();
+      const db = getDB();
+      await db.collection("accounts").doc(state.accId).update({ timesReply: newTimes, updatedAt: new Date().toISOString() });
+      await sendTG(chatId, `✅ تم تعديل المواعيد لـ ${state.accName}`);
+      return res.status(200).send("ok");
+    }
+
+    // await_contact_text — ستنى نص التواصل
+    if (state.type === "await_contact_text") {
+      const newContact = text.trim();
+      const db = getDB();
+      await db.collection("accounts").doc(state.accId).update({ contactReply: newContact, updatedAt: new Date().toISOString() });
+      await sendTG(chatId, `✅ تم تعديل التواصل لـ ${state.accName}`);
+      return res.status(200).send("ok");
+    }
+  }
+
   // ══ KEYWORD DETECTION — بدون AI ══
   try {
     const db = getDB();
@@ -500,7 +625,11 @@ module.exports = async (req, res) => {
       const acc = findAcc(addReplyMatch[1]);
       const label = addReplyMatch[2].trim();
       const replyText = addReplyMatch[3].trim();
-      if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${addReplyMatch[1]}"\n${accs.map(a=>`• ${a.name}`).join("\n")}`); return res.status(200).send("ok"); }
+      if (!acc) {
+        pendingState[chatId] = { type: "await_acc_for_reply", label, replyText };
+        await sendTG(chatId, `مش لاقي أكونت "${addReplyMatch[1]}" 🤔\nاختار من:\n` + accs.map(a => `• ${a.name}`).join("\n"));
+        return res.status(200).send("ok");
+      }
       const replies = (acc.extraReplies || []).concat([{ label, text: replyText }]);
       await db.collection("accounts").doc(acc.id).update({ extraReplies: replies, updatedAt: new Date().toISOString() });
       await logActivity(db,"add_reply","إضافة رد: "+label,"الأكونت: "+acc.name+" | تليجرام");
@@ -520,13 +649,32 @@ module.exports = async (req, res) => {
       return res.status(200).send("ok");
     }
 
-    // 4. إضافة عرض — "ضيف عرض في [أكونت] اسمه [عنوان] ينتهي [تاريخ]"
+    // 4. إضافة عرض
+    // لو بس "ضيف عرض في [أكونت]" من غير عنوان
+    const offerNoTitleMatch = text.match(/^(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+)$/is);
+    if (offerNoTitleMatch && !text.match(/(?:اسمه|با\s*اسم|باسم|عنوانه)/i)) {
+      const acc = findAcc(offerNoTitleMatch[1].trim());
+      if (acc) {
+        pendingState[chatId] = { type: "await_offer_title", accId: acc.id, accName: acc.name };
+        await sendTG(chatId, `✏️ تمام! إيه اسم العرض لـ ${acc.name}؟`);
+        return res.status(200).send("ok");
+      }
+    }
     const addOfferMatch = text.match(/(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+?)\s*(?:اسمه|با\s*اسم|باسم|عنوانه|اسم)\s*(.+?)(?:\s*ينتهي\s*([\d\-\/]+))?$/is);
     if (addOfferMatch) {
       const acc = findAcc(addOfferMatch[1]);
       const title = addOfferMatch[2].trim();
-      if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${addOfferMatch[1]}"\n${accs.map(a=>`• ${a.name}`).join("\n")}`); return res.status(200).send("ok"); }
-      if (!addOfferMatch[3]) { await sendTG(chatId, `📅 تمام! العرض "${title}" لـ ${acc.name}\nبس محتاج تاريخ الانتهاء — ابعت: YYYY-MM-DD`); return res.status(200).send("ok"); }
+      if (!acc) {
+        pendingState[chatId] = { type: "await_acc_for_offer", title };
+        await sendTG(chatId, `مش لاقي أكونت "${addOfferMatch[1]}" 🤔\nاختار من:\n` + accs.map(a => `• ${a.name}`).join("\n"));
+        return res.status(200).send("ok");
+      }
+      if (!addOfferMatch[3]) {
+        // حفظ الـ state وسؤال عن التاريخ
+        pendingState[chatId] = { type: "await_offer_expiry", accId: acc.id, accName: acc.name, title };
+        await sendTG(chatId, `📅 العرض "${title}" لـ ${acc.name}\nينتهي امتى؟ (YYYY-MM-DD) أو قول "مفتوح" لو مش محدد`);
+        return res.status(200).send("ok");
+      }
       const expiry = addOfferMatch[3].replace(/\//g, "-");
       const id = "off_" + Date.now();
       await db.collection("offers").doc(id).set({ id, accountId: acc.id, title, description: "", content: "", image: "", link: "", expiryDate: expiry, badge: "جديد", updatedAt: new Date().toISOString() });
@@ -597,6 +745,12 @@ module.exports = async (req, res) => {
       const acc = findAcc(fixedReplyMatch[1]);
       const newFixed = fixedReplyMatch[2] ? fixedReplyMatch[2].trim() : "";
       if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${fixedReplyMatch[1]}"`); return res.status(200).send("ok"); }
+      // لو مش مسح وبس اسم الأكونت من غير نص — اسأل
+      if (!newFixed && !text.match(/امسح|احذف|مسح|حذف/i)) {
+        pendingState[chatId] = { type: "await_fixed_reply_text", accId: acc.id, accName: acc.name };
+        await sendTG(chatId, `✏️ اكتب نص الرد الثابت لـ ${acc.name}:\n(أو قول "امسح" لو عايز تشيله)`);
+        return res.status(200).send("ok");
+      }
       await db.collection("accounts").doc(acc.id).update({ fixedReply: newFixed, updatedAt: new Date().toISOString() });
       await sendTG(chatId, newFixed ? `✅ تم تعديل الرد الثابت لـ ${acc.name}` : `✅ تم مسح الرد الثابت من ${acc.name}`);
       return res.status(200).send("ok");
@@ -608,6 +762,11 @@ module.exports = async (req, res) => {
       const acc = findAcc(timesMatch[1]);
       const newTimes = timesMatch[2].trim();
       if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${timesMatch[1]}"`); return res.status(200).send("ok"); }
+      if (!newTimes) {
+        pendingState[chatId] = { type: "await_times_text", accId: acc.id, accName: acc.name };
+        await sendTG(chatId, `⏰ اكتب المواعيد لـ ${acc.name}:`);
+        return res.status(200).send("ok");
+      }
       await db.collection("accounts").doc(acc.id).update({ timesReply: newTimes, updatedAt: new Date().toISOString() });
       await sendTG(chatId, `✅ تم تعديل المواعيد لـ ${acc.name}`);
       return res.status(200).send("ok");
@@ -619,6 +778,11 @@ module.exports = async (req, res) => {
       const acc = findAcc(contactMatch[1]);
       const newContact = contactMatch[2].trim();
       if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${contactMatch[1]}"`); return res.status(200).send("ok"); }
+      if (!newContact) {
+        pendingState[chatId] = { type: "await_contact_text", accId: acc.id, accName: acc.name };
+        await sendTG(chatId, `📞 اكتب بيانات التواصل لـ ${acc.name}:`);
+        return res.status(200).send("ok");
+      }
       await db.collection("accounts").doc(acc.id).update({ contactReply: newContact, updatedAt: new Date().toISOString() });
       await sendTG(chatId, `✅ تم تعديل التواصل لـ ${acc.name}`);
       return res.status(200).send("ok");
