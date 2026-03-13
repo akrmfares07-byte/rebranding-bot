@@ -374,6 +374,7 @@ module.exports = async (req, res) => {
       if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${addReplyMatch[1]}"\n${accs.map(a=>`• ${a.name}`).join("\n")}`); return res.status(200).send("ok"); }
       const replies = (acc.extraReplies || []).concat([{ label, text: replyText }]);
       await db.collection("accounts").doc(acc.id).update({ extraReplies: replies, updatedAt: new Date().toISOString() });
+      await logActivity(db,"add_reply","إضافة رد: "+label,"الأكونت: "+acc.name+" | تليجرام");
       await sendTG(chatId, `✅ تم إضافة الرد!\nالأكونت: ${acc.name}\nالاسم: ${label}\nالنص: ${replyText}`);
       return res.status(200).send("ok");
     }
@@ -456,12 +457,13 @@ module.exports = async (req, res) => {
       const isDup = existing.find(x => x.q.trim() === question.trim());
       const newQA = isDup ? existing.map(x => x.q.trim() === question.trim() ? { q: x.q, a: answer } : x) : [...existing, { q: question, a: answer }];
       await db.collection("accounts").doc(acc.id).update({ trainedQA: newQA, updatedAt: new Date().toISOString() });
+      await logActivity(db,"add_info","تدريب البوت: "+question.slice(0,50),"الأكونت: "+acc.name+" | تليجرام");
       await sendTG(chatId, `✅ تم تدريب البوت!\nالأكونت: ${acc.name}\nالسؤال: ${question}\nالجواب: ${answer}`);
       return res.status(200).send("ok");
     }
 
     // 9. مسح/تعديل الرد الثابت — "امسح الرد الثابت من [أكونت]" أو "عدل الرد الثابت في [أكونت] خليه [نص]"
-    const fixedReplyMatch = text.match(/(?:امسح|احذف|عدل|غير)\s*(?:ال)?رد\s*(?:ال)?ثابت\s*(?:من|في|ل)\s*(.+?)(?:\s*(?:خليه|وخليه|يكون)\s*(.+))?$/is);
+    const fixedReplyMatch = text.match(/(?:امسح|احذف|مسح|حذف|عدل|غير|ضيف|اضف|أضف)\s*(?:ال)?رد\s*(?:ال)?ثابت\s*(?:من|في|ل|لـ)\s*(.+?)(?:\s*(?:خليه|وخليه|يكون|وهو|هو|:\s*)\s*(.+))?$/is);
     if (fixedReplyMatch) {
       const acc = findAcc(fixedReplyMatch[1]);
       const newFixed = fixedReplyMatch[2] ? fixedReplyMatch[2].trim() : "";
