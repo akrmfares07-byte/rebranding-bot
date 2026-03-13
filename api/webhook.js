@@ -428,6 +428,47 @@ module.exports = async (req, res) => {
     }
   }
 
+
+  // جدد كل العروض المنتهية
+  if (text === "جدد كل العروض" || text.match(/جدد\s*(?:كل)?\s*(?:ال)?عروض\s*(?:ال)?منتهية/i)) {
+    const db = getDB();
+    const snap = await db.collection("offers").get();
+    const today = new Date().toISOString().slice(0,10);
+    const newDate = new Date(Date.now() + 30*86400000).toISOString().slice(0,10);
+    const expired = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(o => o.expiryDate && o.expiryDate < today);
+    if (!expired.length) { await sendTG(chatId, "✅ مفيش عروض منتهية"); return res.status(200).send("ok"); }
+    for (const o of expired) {
+      await db.collection("offers").doc(o.id).update({ expiryDate: newDate, updatedAt: new Date().toISOString() });
+    }
+    await sendTG(chatId, `✅ تم تجديد ${expired.length} عرض منتهي!\nتاريخ الانتهاء الجديد: ${newDate}`);
+    return res.status(200).send("ok");
+  }
+
+  // انسخ عروض [أكونت] لـ [أكونت]
+  {
+    const copyMatch = text.match(/(?:انسخ|نسخ|copy)\s*عروض\s*(.+?)\s*(?:لـ|ل|إلى|الى)\s*(.+)/i);
+    if (copyMatch) {
+      const db = getDB();
+      const accsSnap = await db.collection("accounts").get();
+      const offsSnap = await db.collection("offers").get();
+      const accs = accsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const offs = offsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const today = new Date().toISOString().slice(0,10);
+      const src = accs.find(a => a.name === copyMatch[1].trim()) || accs.find(a => a.name.includes(copyMatch[1].trim()) || copyMatch[1].trim().includes(a.name));
+      const dst = accs.find(a => a.name === copyMatch[2].trim()) || accs.find(a => a.name.includes(copyMatch[2].trim()) || copyMatch[2].trim().includes(a.name));
+      if (!src) { await sendTG(chatId, `❌ مش لاقي أكونت "${copyMatch[1]}"`); return res.status(200).send("ok"); }
+      if (!dst) { await sendTG(chatId, `❌ مش لاقي أكونت "${copyMatch[2]}"`); return res.status(200).send("ok"); }
+      const srcOffs = offs.filter(o => o.accountId === src.id && (!o.expiryDate || o.expiryDate >= today));
+      if (!srcOffs.length) { await sendTG(chatId, `❌ مفيش عروض نشطة في ${src.name}`); return res.status(200).send("ok"); }
+      for (const o of srcOffs) {
+        const newId = "off_" + Date.now() + Math.random().toString(36).slice(2,6);
+        await db.collection("offers").doc(newId).set({ ...o, id: newId, accountId: dst.id, updatedAt: new Date().toISOString() });
+      }
+      await sendTG(chatId, `✅ تم نسخ ${srcOffs.length} عرض من ${src.name} إلى ${dst.name}`);
+      return res.status(200).send("ok");
+    }
+  }
+
   // ══ KEYWORD DETECTION — بدون AI ══
   try {
     const db = getDB();
