@@ -67,8 +67,33 @@ async function askGroq(systemPrompt, history) {
         }),
       });
       const data = await res.json();
+      console.log("GROQ status:", res.status, "error:", data.error?.message||"none", "reply:", data.choices?.[0]?.message?.content?.slice(0,50)||"empty");
+      if (data.error) {
+        // لو الموديل مش متاح — جرب موديل تاني
+        if (data.error.message?.includes("model") || data.error.code === "model_not_available") {
+          console.log("Trying fallback model...");
+          const res2 = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
+            body: JSON.stringify({
+              model: "llama-3.3-70b-versatile",
+              temperature: 0,
+              max_tokens: 1000,
+              messages: [{ role: "system", content: systemPrompt }, ...history],
+            }),
+          });
+          const data2 = await res2.json();
+          console.log("Fallback reply:", data2.choices?.[0]?.message?.content?.slice(0,50)||"empty");
+          return data2.choices?.[0]?.message?.content || "";
+        }
+        return "";
+      }
       return data.choices?.[0]?.message?.content || "";
-    } catch(e) { if (i === 2) return ""; await new Promise(r => setTimeout(r, 1000)); }
+    } catch(e) {
+      console.error("Groq error:", e.message);
+      if (i === 2) return "";
+      await new Promise(r => setTimeout(r, 1000));
+    }
   }
   return "";
 }
