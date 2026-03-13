@@ -11,8 +11,12 @@
   },
   "crons": [
     {
-      "path": "/api/cron",
-      "schedule": "0 20 * * *"
+      "path": "/api/cron?type=evening",
+      "schedule": "0 17 * * *"
+    },
+    {
+      "path": "/api/cron?type=dawn",
+      "schedule": "0 23 * * *"
     }
   ]
 }
