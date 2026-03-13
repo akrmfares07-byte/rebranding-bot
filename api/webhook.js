@@ -340,6 +340,94 @@ module.exports = async (req, res) => {
     return res.status(200).send("ok");
   }
 
+
+  // ══ COMMANDS ══
+  if (text === "/list" || text === "list") {
+    const db = getDB();
+    const snap = await db.collection("accounts").get();
+    const accs = snap.docs.map(d => d.data());
+    if (!accs.length) { await sendTG(chatId, "مفيش أكونتات"); return res.status(200).send("ok"); }
+    await sendTG(chatId, `📁 الأكونتات (${accs.length}):\n\n` + accs.map((a,i) => `${i+1}. ${a.name} — ${a.category||"عام"} | ${a.status||"نشط"}`).join("\n"));
+    return res.status(200).send("ok");
+  }
+
+  if (text === "/offers" || text === "offers") {
+    const db = getDB();
+    const [accsSnap, offsSnap] = await Promise.all([db.collection("accounts").get(), db.collection("offers").get()]);
+    const accs = accsSnap.docs.map(d => d.data());
+    const today = new Date().toISOString().slice(0,10);
+    const offs = offsSnap.docs.map(d => d.data()).filter(o => !o.expiryDate || o.expiryDate >= today);
+    if (!offs.length) { await sendTG(chatId, "مفيش عروض نشطة"); return res.status(200).send("ok"); }
+    await sendTG(chatId, `🎁 العروض النشطة (${offs.length}):\n\n` + offs.map(o => {
+      const acc = accs.find(a => a.id === o.accountId);
+      const days = o.expiryDate ? Math.ceil((new Date(o.expiryDate) - new Date()) / 86400000) : null;
+      return `• ${o.title}\n  ${acc?.name||"?"} — ${o.expiryDate||"مش محدد"}${days!==null?` (${days} يوم)`:""}`;
+    }).join("\n\n"));
+    return res.status(200).send("ok");
+  }
+
+  if (text === "/expiring" || text === "expiring") {
+    const db = getDB();
+    const [accsSnap, offsSnap] = await Promise.all([db.collection("accounts").get(), db.collection("offers").get()]);
+    const accs = accsSnap.docs.map(d => d.data());
+    const today = new Date().toISOString().slice(0,10);
+    const offs = offsSnap.docs.map(d => d.data()).filter(o => {
+      if (!o.expiryDate || o.expiryDate < today) return false;
+      return Math.ceil((new Date(o.expiryDate) - new Date()) / 86400000) <= 3;
+    });
+    if (!offs.length) { await sendTG(chatId, "✅ مفيش عروض هتنتهي خلال 3 أيام"); return res.status(200).send("ok"); }
+    await sendTG(chatId, `⚠️ عروض هتنتهي قريب:\n\n` + offs.map(o => {
+      const acc = accs.find(a => a.id === o.accountId);
+      const days = Math.ceil((new Date(o.expiryDate) - new Date()) / 86400000);
+      return `• ${o.title}\n  ${acc?.name||"?"} — باقي ${days} يوم`;
+    }).join("\n\n"));
+    return res.status(200).send("ok");
+  }
+
+  if (text === "/stats" || text === "stats") {
+    const db = getDB();
+    const [accsSnap, offsSnap, uqSnap] = await Promise.all([
+      db.collection("accounts").get(),
+      db.collection("offers").get(),
+      db.collection("unanswered_questions").get()
+    ]);
+    const today = new Date().toISOString().slice(0,10);
+    const accs = accsSnap.docs.map(d => d.data());
+    const offs = offsSnap.docs.map(d => d.data());
+    const uqs = uqSnap.docs.map(d => d.data());
+    const activeOffs = offs.filter(o => !o.expiryDate || o.expiryDate >= today);
+    const expiredOffs = offs.filter(o => o.expiryDate && o.expiryDate < today);
+    const answered = uqs.filter(q => q.a).length;
+    const totalQA = accs.reduce((s,a) => s + (a.trainedQA||[]).length, 0);
+    await sendTG(chatId, `📊 إحصائيات Rebranding:\n\n👤 الأكونتات: ${accs.length}\n🎁 العروض النشطة: ${activeOffs.length}\n⏰ العروض المنتهية: ${expiredOffs.length}\n🧠 أسئلة مدربة: ${totalQA}\n❓ غير مجاوبة: ${uqs.length - answered}\n✅ مجاوبة: ${answered}`);
+    return res.status(200).send("ok");
+  }
+
+  {
+    const showAccMatch = text.match(/(?:شوف|عرض|اعرض|بيانات)\s*(?:اكونت|أكونت)?\s*(.+)/i);
+    if (showAccMatch) {
+      const db = getDB();
+      const snap = await db.collection("accounts").get();
+      const accs = snap.docs.map(d => d.data());
+      const name = showAccMatch[1].trim();
+      const acc = accs.find(a => a.name === name) || accs.find(a => a.name.includes(name) || name.includes(a.name));
+      if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${name}"`); return res.status(200).send("ok"); }
+      const offsSnap = await db.collection("offers").get();
+      const today = new Date().toISOString().slice(0,10);
+      const accOffs = offsSnap.docs.map(d => d.data()).filter(o => o.accountId === acc.id && (!o.expiryDate || o.expiryDate >= today));
+      let msg = `👤 ${acc.name}\n📂 ${acc.category||"عام"} | ${acc.status||"نشط"}\n`;
+      if (acc.description) msg += `📝 ${acc.description}\n`;
+      if (acc.fixedReply) msg += `\n💬 الرد الثابت:\n${acc.fixedReply}\n`;
+      if (acc.timesReply) msg += `\n⏰ المواعيد:\n${acc.timesReply}\n`;
+      if (acc.contactReply) msg += `\n📞 التواصل:\n${acc.contactReply}\n`;
+      if (acc.extraReplies?.length) msg += `\n🔘 ردود إضافية (${acc.extraReplies.length}):\n` + acc.extraReplies.map(r => `• ${r.label}`).join("\n") + "\n";
+      if (accOffs.length) msg += `\n🎁 عروض (${accOffs.length}):\n` + accOffs.map(o => `• ${o.title} — ينتهي ${o.expiryDate}`).join("\n") + "\n";
+      if (acc.trainedQA?.length) msg += `\n🧠 أسئلة مدربة: ${acc.trainedQA.length}`;
+      await sendTG(chatId, msg);
+      return res.status(200).send("ok");
+    }
+  }
+
   // ══ KEYWORD DETECTION — بدون AI ══
   try {
     const db = getDB();
