@@ -493,7 +493,7 @@ module.exports = async (req, res) => {
       const id = "off_" + Date.now();
       await db.collection("offers").doc(id).set({
         id, accountId: state.accId, title: state.title,
-        description: "", content: "", image: "", link: "",
+        description: "", content: state.content || "", image: "", link: "",
         expiryDate: expiry, badge: "جديد",
         updatedAt: new Date().toISOString()
       });
@@ -660,7 +660,7 @@ module.exports = async (req, res) => {
         return res.status(200).send("ok");
       }
     }
-    const addOfferMatch = text.match(/(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+?)\s*(?:اسمه|با\s*اسم|باسم|عنوانه|اسم)\s*(.+?)(?:\s*ينتهي\s*([\d\-\/]+))?$/is);
+    const addOfferMatch = text.match(/(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+?)\s*(?:اسمه|با\s*اسم|باسم|عنوانه|اسم)\s*(.+?)(?:\s*(?:المحتوي|المحتوى|التفاصيل|الوصف)\s*(.+?))?(?:\s*ينتهي\s*([\d\-\/]+))?$/is);
     if (addOfferMatch) {
       const acc = findAcc(addOfferMatch[1]);
       const title = addOfferMatch[2].trim();
