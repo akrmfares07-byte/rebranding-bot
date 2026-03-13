@@ -495,7 +495,7 @@ module.exports = async (req, res) => {
     }
 
     // 2. إضافة رد جاهز — "ضيف رد في [أكونت] اسمه [اسم] المحتوي [نص]"
-    const addReplyMatch = text.match(/(?:ضيف|اضف|أضف)\s*رد\s*(?:في|ل|لـ)\s*(.+?)\s*اسمه\s*(.+?)\s*(?:المحتوي|المحتوى|النص|وهو|هو)\s*(.+)/is);
+    const addReplyMatch = text.match(/(?:ضيف|اضف|أضف)\s*رد\s*(?:في|ل|لـ)\s*(.+?)\s*(?:اسمه|با\s*اسم|باسم|اسم)\s*(.+?)\s*(?:المحتوي|المحتوى|النص|وهو|هو)\s*(.+)/is);
     if (addReplyMatch) {
       const acc = findAcc(addReplyMatch[1]);
       const label = addReplyMatch[2].trim();
@@ -521,7 +521,7 @@ module.exports = async (req, res) => {
     }
 
     // 4. إضافة عرض — "ضيف عرض في [أكونت] اسمه [عنوان] ينتهي [تاريخ]"
-    const addOfferMatch = text.match(/(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+?)\s*اسمه\s*(.+?)(?:\s*ينتهي\s*([\d\-\/]+))?$/is);
+    const addOfferMatch = text.match(/(?:ضيف|اضف|أضف)\s*عرض\s*(?:في|ل|لـ)\s*(.+?)\s*(?:اسمه|با\s*اسم|باسم|عنوانه|اسم)\s*(.+?)(?:\s*ينتهي\s*([\d\-\/]+))?$/is);
     if (addOfferMatch) {
       const acc = findAcc(addOfferMatch[1]);
       const title = addOfferMatch[2].trim();
