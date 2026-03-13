@@ -46,7 +46,7 @@ async function askAI(systemPrompt, history) {
         "X-Title": "Rebranding Bot"
       },
       body: JSON.stringify({
-        model: "meta-llama/llama-4-maverick:free",
+        model: "meta-llama/llama-3.3-70b-instruct:free",
         messages,
         max_tokens: 800,
         temperature: 0
