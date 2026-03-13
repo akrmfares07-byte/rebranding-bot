@@ -13,7 +13,7 @@ function getDB() {
   return getFirestore();
 }
 
-const GROQ_KEY = process.env.GROQ_KEY;
+const GROQ_KEY = process.env.GROQ_KEY; // legacy
 const TG_TOKEN = process.env.TG_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim());
 const chatHistory = {};
@@ -33,19 +33,30 @@ async function logActivity(db, type, label, detail) {
   } catch(e) {}
 }
 
-async function askGroq(systemPrompt, history) {
+async function askAI(systemPrompt, history) {
   const messages = [{ role: "system", content: systemPrompt }, ...history];
+  const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
   try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` },
-      body: JSON.stringify({ model: "meta-llama/llama-4-maverick-17b-128e-instruct", messages, max_tokens: 800, temperature: 0 }),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENROUTER_KEY}`,
+        "HTTP-Referer": "https://rebranding-bot-ecru.vercel.app",
+        "X-Title": "Rebranding Bot"
+      },
+      body: JSON.stringify({
+        model: "meta-llama/llama-4-maverick:free",
+        messages,
+        max_tokens: 800,
+        temperature: 0
+      }),
     });
     const d = await res.json();
-    console.log("GROQ status:", res.status, "| reply:", d.choices?.[0]?.message?.content?.slice(0,80) || JSON.stringify(d.error));
+    console.log("AI status:", res.status, "| reply:", d.choices?.[0]?.message?.content?.slice(0,80) || JSON.stringify(d.error));
     return d.choices?.[0]?.message?.content || "";
   } catch(e) {
-    console.error("GROQ error:", e.message);
+    console.error("AI error:", e.message);
     return "";
   }
 }
@@ -308,7 +319,7 @@ module.exports = async (req, res) => {
     chatHistory[chatId].push({ role: "user", content: text });
     if (chatHistory[chatId].length > 8) chatHistory[chatId] = chatHistory[chatId].slice(-8);
 
-    const reply = await askGroq(ctx, chatHistory[chatId]);
+    const reply = await askAI(ctx, chatHistory[chatId]);
     chatHistory[chatId].push({ role: "assistant", content: reply });
 
     const actionMatch = reply.match(/\[ACTION\]\s*(\{[\s\S]*?\})/);
