@@ -360,6 +360,7 @@ module.exports = async (req, res) => {
     if (pwMatch) {
       const newPw = pwMatch[1].trim();
       await db.collection("settings").doc("admin").set({ password: newPw, updatedAt: new Date().toISOString() }, { merge: true });
+      await logActivity(db,"change_password","تغيير الباسورد","تليجرام");
       await sendTG(chatId, `🔐 تم تغيير الباسورد!\nالجديد: ${newPw}`);
       return res.status(200).send("ok");
     }
@@ -410,6 +411,7 @@ module.exports = async (req, res) => {
       const off = offs.find(o => o.title.includes(title) || title.includes(o.title));
       if (!off) { await sendTG(chatId, `❌ مش لاقي عرض اسمه "${title}"`); return res.status(200).send("ok"); }
       await db.collection("offers").doc(off.id).delete();
+      await logActivity(db,"delete_offer","حذف عرض: "+off.title,"تليجرام");
       await sendTG(chatId, `🗑️ تم حذف العرض: ${off.title}`);
       return res.status(200).send("ok");
     }
@@ -421,6 +423,7 @@ module.exports = async (req, res) => {
       const category = (addAccMatch[2] || "عام").trim();
       const id = "acc_" + Date.now();
       await db.collection("accounts").doc(id).set({ id, name, category, description: "", status: "نشط", avatar: "", coverImage: "", tags: [], links: [], extraReplies: [], galleryImages: [], trainedQA: [], fixedReply: "", timesReply: "", contactReply: "", pinned: false, joinedDate: new Date().toISOString().slice(0,10), updatedAt: new Date().toISOString() });
+      await logActivity(db,"add_account","إضافة أكونت: "+name,"تليجرام");
       await sendTG(chatId, `✅ تم إضافة الأكونت!\nالاسم: ${name}\nالكاتيجوري: ${category}`);
       return res.status(200).send("ok");
     }
@@ -431,6 +434,7 @@ module.exports = async (req, res) => {
       const acc = findAcc(delAccMatch[1]);
       if (!acc) { await sendTG(chatId, `❌ مش لاقي أكونت "${delAccMatch[1]}"`); return res.status(200).send("ok"); }
       await db.collection("accounts").doc(acc.id).delete();
+      await logActivity(db,"delete_account","حذف أكونت: "+acc.name,"تليجرام");
       await sendTG(chatId, `🗑️ تم حذف الأكونت: ${acc.name}`);
       return res.status(200).send("ok");
     }
@@ -467,8 +471,8 @@ module.exports = async (req, res) => {
       return res.status(200).send("ok");
     }
 
-    // 10. تعديل المواعيد — "عدل مواعيد [أكونت] خليها [نص]"
-    const timesMatch = text.match(/(?:عدل|غير|بدل)\s*(?:ال)?مواعيد\s*(?:في|من|ل)?\s*(.+?)\s*(?:خليها|خليه|يكون|وخليها)\s*(.+)/is);
+    // 10. تعديل المواعيد
+    const timesMatch = text.match(/(?:عدل|غير|بدل|اضبط|حدد)\s*(?:ال)?(?:مواعيد|وقت|اوقات|أوقات|ساعات)\s*(?:في|من|ل|بتاع|بتاعت)?\s*(.+?)\s*(?:خليها|خليه|يكون|وخليها|تكون|هي|هتكون)?\s*[:\-]?\s*(.+)/is);
     if (timesMatch) {
       const acc = findAcc(timesMatch[1]);
       const newTimes = timesMatch[2].trim();
@@ -478,8 +482,8 @@ module.exports = async (req, res) => {
       return res.status(200).send("ok");
     }
 
-    // 11. تعديل التواصل — "عدل التواصل في [أكونت] خليه [نص]"
-    const contactMatch = text.match(/(?:عدل|غير|بدل)\s*(?:ال)?(?:تواصل|كونتاكت|رقم)\s*(?:في|من|ل)?\s*(.+?)\s*(?:خليه|خليها|يكون)\s*(.+)/is);
+    // 11. تعديل التواصل
+    const contactMatch = text.match(/(?:عدل|غير|بدل)\s*(?:ال)?(?:تواصل|كونتاكت|رقم|واتساب)\s*(?:في|من|ل|بتاع|بتاعت)?\s*(.+?)\s*(?:خليه|خليها|يكون|هو)?\s*[:\-]?\s*(.+)/is);
     if (contactMatch) {
       const acc = findAcc(contactMatch[1]);
       const newContact = contactMatch[2].trim();
