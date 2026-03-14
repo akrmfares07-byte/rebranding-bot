@@ -68,7 +68,25 @@ module.exports = async (req, res) => {
   }
 
   if (text === "/start" || text === "/reset") {
-    await sendTG(chatId, "👋 أهلاً! قولي إيه اللي عايزه.");
+    await sendTG(chatId, "👋 أهلاً! قولي إيه اللي عايزه.\n\nاكتب /subscribe عشان تشترك في إشعارات Rebranding");
+    return res.status(200).send("ok");
+  }
+
+  // اشتراك في الإشعارات
+  if (text === "/subscribe" || text === "اشترك" || text === "subscribe") {
+    const db = getDB();
+    await db.collection("telegram_subscribers").doc(chatId).set({
+      chatId, subscribedAt: new Date().toISOString(), active: true
+    });
+    await sendTG(chatId, "✅ تم الاشتراك في إشعارات Rebranding!\n🔔 هتوصلك إشعار لما يتضاف عرض جديد أو أكونت\n\nاكتب /unsubscribe عشان تلغي الاشتراك");
+    return res.status(200).send("ok");
+  }
+
+  // إلغاء الاشتراك
+  if (text === "/unsubscribe" || text === "unsubscribe") {
+    const db = getDB();
+    await db.collection("telegram_subscribers").doc(chatId).delete();
+    await sendTG(chatId, "✅ تم إلغاء الاشتراك");
     return res.status(200).send("ok");
   }
 
