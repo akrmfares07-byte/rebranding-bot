@@ -158,6 +158,7 @@ async function checkOffers(db) {
       (new Date(o.expiryDate).getTime() - new Date(today).getTime()) / 86400000
     );
     alerts.push(`⚠️ عرض قرب ينتهي!\n📍 ${acc?.name || o.accountId}\n🎁 ${o.title}\n⏰ باقي ${daysLeft} يوم`);
+    await sendFCMPush(db, `⚠️ عرض ينتهي خلال ${daysLeft} يوم — ${o.title}`, `${acc?.name || ""} · لا تفوتك الفرصة 🔥`, o.accountId);
   }
 
   // أكونتات نشطة من غير عروض
