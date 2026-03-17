@@ -21,6 +21,47 @@ function getDB() {
   return getFirestore();
 }
 
+// ══ FCM Push to all tokens ══
+async function sendFCMPush(title, body, accId) {
+  try {
+    const { getMessaging } = require("firebase-admin/messaging");
+    const db = getDB();
+    const snap = await db.collection("fcm_tokens").get();
+    const tokens = [];
+    snap.forEach(doc => {
+      const t = doc.data().token;
+      if (t) tokens.push(t);
+    });
+    if (!tokens.length) return;
+    // Send in batches of 500
+    const messaging = getMessaging();
+    for (let i = 0; i < tokens.length; i += 500) {
+      const batch = tokens.slice(i, i + 500);
+      await messaging.sendEachForMulticast({
+        tokens: batch,
+        notification: { title, body },
+        data: accId ? { accId } : {},
+        android: { priority: "high" },
+        apns: { payload: { aps: { sound: "default", badge: 1 } } },
+        webpush: {
+          headers: { Urgency: "high" },
+          notification: { title, body, icon: "https://res.cloudinary.com/diepkkeyu/image/upload/v1773517119/404042723_763352762472137_4889753537613967821_n_p3hhjh.jpg" }
+        }
+      });
+    }
+    // Also write to Firestore notifications collection
+    const id = "notif_" + Date.now();
+    await db.collection("notifications").doc(id).set({
+      id, title, body,
+      accId: accId || null,
+      createdAt: new Date().toISOString(),
+      read: false
+    });
+  } catch(e) {
+    console.error("sendFCMPush error:", e.message);
+  }
+}
+
 const GROQ_KEY = process.env.GROQ_KEY;
 const TG_TOKEN = process.env.TG_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -152,6 +193,7 @@ async function execAction(db, actionStr, accs, activeOffs, today) {
       badge: parsed.badge || "جديد",
       updatedAt: new Date().toISOString(),
     });
+    await sendFCMPush(`🎁 عرض جديد — ${acc.name}`, parsed.title + (expiry ? ` · ينتهي ${expiry}` : ""), parsed.accountId);
     return `✅ تم إضافة العرض\nالاسم: ${parsed.title}\nالأكونت: ${acc.name}\nينتهي: ${expiry}${wasFixed ? " (تم تحديده تلقائي)" : ""}`;
   }
 
@@ -165,6 +207,7 @@ async function execAction(db, actionStr, accs, activeOffs, today) {
       ...parsed.changes,
       updatedAt: new Date().toISOString(),
     });
+    await sendFCMPush(`✏️ تم تحديث عرض — ${off.title}`, "تم تحديث بيانات العرض", off.accountId);
     return `✅ تم تعديل: ${off.title}`;
   }
 
@@ -218,6 +261,7 @@ async function execAction(db, actionStr, accs, activeOffs, today) {
       joinedDate: getEgyptDate(),
       updatedAt: new Date().toISOString(),
     });
+    await sendFCMPush(`👤 أكونت جديد — ${parsed.name}`, "انضم لـ Rebranding Data Mod ✨", id);
     return `✅ تم إضافة الأكونت\nالاسم: ${parsed.name}\nالكاتيجوري: ${parsed.category || "عام"}\n\nتقدر تضيف تفاصيل أكتر من السايت ✏️`;
   }
 
