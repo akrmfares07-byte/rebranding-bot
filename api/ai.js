@@ -1,210 +1,135 @@
+
 import {
-  executeAction,
-  getPendingConfirmation,
-  setPendingConfirmation,
-  clearPendingConfirmation,
-  saveChatMemory,
-  getRecentChatMemory
+  executeIntent,
+  buildContext,
+  classifyIntent,
+  saveSupportTicket,
+  listPendingSupport,
+  answerSupportTicket,
+  getRecentMemory,
+  saveMemory,
+  askGroq
 } from "../lib/core.js";
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-
-function jsonResponse(data, status = 200) {
+function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json; charset=utf-8" }
   });
 }
+
+function adminChatPrompt() {
+  return `أنت مساعد إداري ذكي لنظام Rebranding.
+- افهم الطلبات الحرة بالعربية أو الإنجليزية.
+- لو الطلب إداري وممكن تنفيذه، رجّع JSON فقط بالشكل:
+{"mode":"intent","intent":{...}}
+- لو الطلب سؤال عادي أو دردشة، رجّع JSON فقط بالشكل:
+{"mode":"chat","reply":"..."}
+- لو الطلب عن تذاكر الدعم المعلقة، استخدم الأنواع:
+  get_pending_support, answer_support_ticket
+- لو الطلب عن الإحصائيات استخدم get_stats
+- لو الطلب عن المستخدمين/العروض/الأكونتات استخدم نفس الأنواع المتاحة في النظام.
+- لو محتاج تفاصيل ناقصة قلها في reply بدل التنفيذ.
+- الردود تكون عربية واضحة ومختصرة.
+`;}
+
+function websitePrompt() {
+  return `أنت بوت خدمة عملاء لموقع Rebranding.
+- لا تنفذ أوامر إدارية أبدًا.
+- جاوب فقط من المعلومات العامة المتاحة: العروض، الأكونتات، المساعدة، طريقة التواصل.
+- لو السؤال خارج المعرفة أو يحتاج تدخل بشري، رجّع JSON فقط:
+{"mode":"escalate","reply":"..."}
+- لو تقدر تجاوب، رجّع JSON فقط:
+{"mode":"chat","reply":"..."}
+- الرد يكون مهذب جدًا وبالعربية المصرية.
+`;}
 
 function extractJson(text) {
-  const match = String(text || "").match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("No JSON returned");
-  return JSON.parse(match[0]);
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("No JSON");
+  return JSON.parse(m[0]);
 }
 
-function isYes(text) {
-  const t = String(text || "").trim().toLowerCase();
-  return ["yes", "y", "confirm", "ok", "تمام", "ايوه", "نعم", "نفذ", "أكد"].includes(t);
-}
-
-function isNo(text) {
-  const t = String(text || "").trim().toLowerCase();
-  return ["no", "n", "cancel", "الغاء", "إلغاء", "لأ", "لا", "وقف"].includes(t);
-}
-
-function needsConfirmation(action) {
-  return ["send_notification_all", "delete_user", "delete_offer", "delete_account"].includes(action);
-}
-
-async function callGroq(messages) {
-  const res = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.GROQ_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages
-    })
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Groq failed: ${txt}`);
-  }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "{}";
-}
-
-async function planAction(message, memory = []) {
-  const system = `
-أنت عقل تحكم إداري لتطبيق.
-مهمتك ترجع JSON فقط، بدون أي كلام إضافي.
-
-الـ actions المسموحة:
-- normal_chat
-- stats
-- add_user
-- list_users
-- create_offer
-- list_offers
-- add_account
-- search_accounts
-- send_notification_all
-- unknown
-
-ارجع JSON بالشكل:
-{
-  "kind": "chat | action",
-  "action": "normal_chat | stats | add_user | list_users | create_offer | list_offers | add_account | search_accounts | send_notification_all | unknown",
-  "data": {},
-  "reply": "رد عربي طبيعي مختصر للمستخدم لو kind=chat",
-  "reason": "سبب مختصر"
-}
-
-قواعد مهمة:
-- لو المستخدم بيدردش فقط، استخدم normal_chat.
-- لو الطلب ناقص تفاصيل، حاول تستنتج بأقل افتراض آمن.
-- لو قال "إحصائيات" => action=stats
-- لو قال "ضيف يوزر احمد 010" => action=add_user و data فيها name و phone لو موجود
-- لو قال "اعمل عرض 20% باسم رمضان" => action=create_offer
-- لو قال "هات العروض" => action=list_offers
-- لو قال "دور على حساب مطعم" => action=search_accounts و data.query
-- لو قال "ضيف حساب" => action=add_account
-- لو مش واضح إطلاقًا => unknown
-- الرد يكون بالعربية.
-`;
-
-  const content = await callGroq([
-    { role: "system", content: system },
-    ...memory,
-    { role: "user", content: message }
-  ]);
-
-  return extractJson(content);
-}
-
-async function chatReply(message, memory = []) {
-  const system = `
-أنت مساعد ذكي داخل بوت إداري.
-اتكلم بالعربي المصري بشكل واضح وعملي.
-لو السؤال عام، جاوب باختصار.
-لو المستخدم يطلب تنفيذ وإنت مش هتنفذ هنا، قلله بشكل طبيعي.
-`;
-
-  const content = await callGroq([
-    { role: "system", content: system },
-    ...memory,
-    { role: "user", content: message }
-  ]);
-
-  return content;
-}
-
-export default async function handler(request) {
-  if (request.method === "GET") {
-    return jsonResponse({ ok: true, message: "AI route is working" });
-  }
-
-  if (request.method !== "POST") {
-    return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
-  }
-
+export default async function handler(req) {
   try {
-    const body = await request.json();
+    if (req.method === "GET") {
+      return json({ ok: true, message: "AI route is working" });
+    }
+
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "Method not allowed" }, 405);
+    }
+
+    const body = await req.json();
     const message = String(body.message || "").trim();
-    const chatId = String(body.chatId || "");
-    const source = String(body.source || "dashboard");
-    const actorId = String(body.actorId || chatId || "unknown");
+    const source = String(body.source || "admin_chat");
+    const actorId = String(body.actorId || body.chatId || "unknown");
+    const sessionId = String(body.sessionId || body.chatId || actorId || Date.now());
+    const supportTicketId = String(body.supportTicketId || "").trim();
 
-    if (!message) {
-      return jsonResponse({ ok: false, reply: "ابعت رسالة الأول." }, 400);
-    }
+    if (!message) return json({ ok: false, reply: "ابعت رسالة الأول." }, 400);
 
-    if (chatId) {
-      const pending = await getPendingConfirmation(chatId);
-      if (pending) {
-        if (isYes(message)) {
-          const reply = await executeAction(pending.action, pending.data, { source, actorId });
-          await clearPendingConfirmation(chatId);
-          await saveChatMemory(chatId, "user", message);
-          await saveChatMemory(chatId, "assistant", reply);
-          return jsonResponse({ ok: true, reply });
-        }
+    const context = await buildContext();
+    const memory = await getRecentMemory(sessionId);
 
-        if (isNo(message)) {
-          await clearPendingConfirmation(chatId);
-          const reply = "❌ تم إلغاء العملية.";
-          await saveChatMemory(chatId, "user", message);
-          await saveChatMemory(chatId, "assistant", reply);
-          return jsonResponse({ ok: true, reply });
-        }
+    let plan;
+    if (source === "website_bot") {
+      const prompt = `${websitePrompt()}\n\nالسياق المختصر:\naccounts=${JSON.stringify(context.accounts.slice(0,15).map(a => ({name:a.name,category:a.category,description:a.description})))}\noffers=${JSON.stringify(context.offers.slice(0,15).map(o => ({title:o.title,description:o.description,expiryDate:o.expiryDate})))}\n\nرسالة العميل: ${message}`;
+      const raw = await askGroq([{ role: 'system', content: websitePrompt() }, ...memory, { role: 'user', content: prompt }]);
+      plan = extractJson(raw);
+
+      if (plan.mode === 'escalate') {
+        const ticket = await saveSupportTicket({
+          sessionId,
+          actorId,
+          question: message,
+          source,
+          customerName: body.customerName || "",
+          customerContact: body.customerContact || ""
+        });
+        const reply = plan.reply || "محتاج أتأكد من التفاصيل دي، فهحول سؤالك للإدارة وهيتم الرد عليك قريب.";
+        await saveMemory(sessionId, 'user', message);
+        await saveMemory(sessionId, 'assistant', reply);
+        return json({ ok: true, reply, escalated: true, ticketId: ticket.id });
       }
+
+      const reply = plan.reply || "أقدر أساعدك في العروض والحسابات المتاحة أو أوصلك بالدعم.";
+      await saveMemory(sessionId, 'user', message);
+      await saveMemory(sessionId, 'assistant', reply);
+      return json({ ok: true, reply, mode: 'chat' });
     }
 
-    const memory = chatId ? await getRecentChatMemory(chatId) : [];
-    const plan = await planAction(message, memory);
+    // Admin chat / telegram / dashboard
+    const raw = await askGroq([{ role: 'system', content: adminChatPrompt() }, ...memory, { role: 'user', content: message }]);
+    try {
+      plan = extractJson(raw);
+    } catch {
+      plan = null;
+    }
 
     let reply = "تمام.";
     let performed = false;
 
-    if (plan.kind === "action" && plan.action && plan.action !== "unknown" && plan.action !== "normal_chat") {
-      if (needsConfirmation(plan.action) && chatId) {
-        await setPendingConfirmation(chatId, {
-          action: plan.action,
-          data: plan.data || {}
-        });
-
-        reply = `⚠️ العملية دي محتاجة تأكيد.\nاكتب: نعم\nأو: لا`;
-      } else {
-        reply = await executeAction(plan.action, plan.data || {}, { source, actorId });
-        performed = true;
-      }
-    } else if (plan.action === "normal_chat" || plan.kind === "chat") {
-      reply = plan.reply || await chatReply(message, memory);
+    if (supportTicketId && message) {
+      reply = await answerSupportTicket(supportTicketId, message, actorId);
+      performed = true;
+    } else if (plan?.mode === 'intent' && plan.intent) {
+      reply = await executeIntent(plan.intent, context, source);
+      performed = true;
+    } else if (/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/i.test(message)) {
+      reply = await listPendingSupport();
+      performed = true;
+    } else if (plan?.mode === 'chat' && plan.reply) {
+      reply = plan.reply;
     } else {
-      reply = await chatReply(message, memory);
+      reply = raw || "مش واضح 100%، اكتب الطلب بشكل أوضح.";
     }
 
-    if (chatId) {
-      await saveChatMemory(chatId, "user", message);
-      await saveChatMemory(chatId, "assistant", reply);
-    }
+    await saveMemory(sessionId, 'user', message);
+    await saveMemory(sessionId, 'assistant', reply);
 
-    return jsonResponse({
-      ok: true,
-      performed,
-      action: plan.action || "normal_chat",
-      reply
-    });
-  } catch (err) {
-    return jsonResponse({
-      ok: true,
-      reply: "في حاجة وقفت التنفيذ. راجع المتغيرات و Firebase وجرّب تاني."
-    });
+    return json({ ok: true, reply, performed });
+  } catch (e) {
+    return json({ ok: true, reply: "في مشكلة بسيطة في التنفيذ. راجع الإعدادات أو جرّب تاني.", error: String(e.message || e) });
   }
 }
