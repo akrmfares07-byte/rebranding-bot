@@ -1,48 +1,92 @@
-async function sendTelegramMessage(chatId, text) {
-  const resp = await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text
-    })
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" }
   });
-
-  return resp.json();
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(200).json({ ok: true });
-  }
-
-  const body = req.body || {};
-  const msg = body.message;
-
-  if (!msg?.chat?.id || !msg?.text) {
-    return res.status(200).json({ ok: true });
-  }
-
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (text === "/start") {
-    await sendTelegramMessage(
-      chatId,
-      "🔥 البوت شغال\nابعت طلب زي:\n- احصائيات\n- ضيف يوزر أحمد\n- ضيف عرض 20%\n- ابعت اشعار"
-    );
-    return res.status(200).json({ ok: true });
-  }
-
-  const aiResp = await fetch(`${process.env.APP_BASE_URL}/api/ai`, {
+async function tg(method, body) {
+  const token = process.env.TG_TOKEN;
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: text, source: "telegram" })
+    body: JSON.stringify(body)
   });
 
-  const aiData = await aiResp.json();
+  return res.json();
+}
 
-  await sendTelegramMessage(chatId, aiData.reply || "تم استلام الطلب.");
+function isAdmin(chatId) {
+  const admins = String(process.env.ADMIN_IDS || "")
+    .split(",")
+    .map(x => x.trim())
+    .filter(Boolean);
 
-  return res.status(200).json({ ok: true });
+  if (!admins.length) return true;
+  return admins.includes(String(chatId));
+}
+
+export default async function handler(request) {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: true });
+  }
+
+  try {
+    const body = await request.json();
+    const msg = body.message;
+
+    if (!msg?.chat?.id || !msg?.text) {
+      return jsonResponse({ ok: true });
+    }
+
+    const chatId = msg.chat.id;
+    const text = msg.text;
+
+    if (!isAdmin(chatId)) {
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "❌ البوت ده خاص بالإدارة فقط."
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    if (text === "/start") {
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text:
+          "🔥 البوت الذكي شغال\n\n" +
+          "أمثلة:\n" +
+          "- احصائيات\n" +
+          "- ضيف يوزر احمد 010\n" +
+          "- اعمل عرض 20% باسم رمضان\n" +
+          "- هات العروض\n" +
+          "- دور على حساب مطعم\n" +
+          "- ضيف حساب باسم خزين فئة مشويات"
+      });
+
+      return jsonResponse({ ok: true });
+    }
+
+    const aiRes = await fetch(`${process.env.APP_BASE_URL}/api/ai`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: "telegram",
+        chatId: String(chatId),
+        actorId: String(chatId),
+        message: text
+      })
+    });
+
+    const ai = await aiRes.json();
+
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: ai.reply || "تم."
+    });
+
+    return jsonResponse({ ok: true });
+  } catch (e) {
+    return jsonResponse({ ok: true });
+  }
 }
