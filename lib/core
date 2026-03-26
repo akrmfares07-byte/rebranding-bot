@@ -1,290 +1,219 @@
+import admin from "firebase-admin";
 
-const { initializeApp, getApps } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
-const { credential } = require("firebase-admin");
-const { getMessaging } = require("firebase-admin/messaging");
-
-const LOGO = "https://res.cloudinary.com/diepkkeyu/image/upload/v1773517119/404042723_763352762472137_4889753537613967821_n_p3hhjh.jpg";
-
-function getEgyptDate() {
-  return new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 10);
+function getEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
-function getDB() {
-  if (!getApps().length) {
-    initializeApp({
-      credential: credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-      }),
-    });
-  }
-  return getFirestore();
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: getEnv("FIREBASE_PROJECT_ID"),
+      clientEmail: getEnv("FIREBASE_CLIENT_EMAIL"),
+      privateKey: getEnv("FIREBASE_PRIVATE_KEY").replace(/\\n/g, "\n")
+    })
+  });
 }
 
-async function getContext(db) {
-  const [accsSnap, offsSnap, usersSnap, toksSnap] = await Promise.all([
-    db.collection("accounts").get(),
-    db.collection("offers").get(),
-    db.collection("user_data").get(),
-    db.collection("fcm_tokens").get(),
+const db = admin.firestore();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeText(v, fallback = "") {
+  return typeof v === "string" ? v.trim() : fallback;
+}
+
+export async function logAction(source, actorId, action, data = {}) {
+  await db.collection("activity_log").add({
+    source,
+    actorId: String(actorId || ""),
+    action,
+    data,
+    createdAt: nowIso()
+  });
+}
+
+export async function getStats() {
+  const [usersSnap, offersSnap, accountsSnap] = await Promise.all([
+    db.collection("users").get().catch(() => ({ size: 0 })),
+    db.collection("offers").get().catch(() => ({ size: 0 })),
+    db.collection("accounts").get().catch(() => ({ size: 0 }))
   ]);
-  const accounts = accsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const offers = offsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-  const usersMap = new Map();
-  usersSnap.docs.forEach(d => usersMap.set(d.id, { uid: d.id, ...d.data() }));
-  toksSnap.docs.forEach(d => usersMap.set(d.id, { ...(usersMap.get(d.id) || { uid: d.id }), ...d.data(), uid: d.id }));
-  return { accounts, offers, users: [...usersMap.values()], today: getEgyptDate(), tokensCount: toksSnap.size };
+
+  return {
+    users: usersSnap.size || 0,
+    offers: offersSnap.size || 0,
+    accounts: accountsSnap.size || 0
+  };
 }
 
-async function sendFCMPush(title, body, accId) {
-  const db = getDB();
-  const snap = await db.collection("fcm_tokens").get();
-  const tokens = [];
-  snap.forEach(doc => {
-    const token = doc.data()?.token;
-    if (token && typeof token === "string" && token.length > 20) tokens.push(token);
+export async function addUser(data = {}) {
+  const name = safeText(data.name, "بدون اسم");
+  const phone = safeText(data.phone);
+  const note = safeText(data.note);
+
+  const payload = {
+    name,
+    phone,
+    note,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+
+  const ref = await db.collection("users").add(payload);
+  return { id: ref.id, ...payload };
+}
+
+export async function listUsers(limit = 10) {
+  const snap = await db.collection("users").limit(limit).get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+export async function createOffer(data = {}) {
+  const title = safeText(data.title || data.name, "عرض جديد");
+  const discount = safeText(data.discount);
+  const expiresAt = safeText(data.expiresAt);
+  const details = safeText(data.details);
+
+  const payload = {
+    title,
+    discount,
+    details,
+    expiresAt,
+    active: true,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+
+  const ref = await db.collection("offers").add(payload);
+  return { id: ref.id, ...payload };
+}
+
+export async function listOffers(limit = 10) {
+  const snap = await db.collection("offers").limit(limit).get();
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+export async function addAccount(data = {}) {
+  const payload = {
+    name: safeText(data.name, "حساب جديد"),
+    category: safeText(data.category),
+    description: safeText(data.description),
+    image: safeText(data.image),
+    pinned: Boolean(data.pinned),
+    active: data.active !== false,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+
+  const ref = await db.collection("accounts").add(payload);
+  return { id: ref.id, ...payload };
+}
+
+export async function searchAccounts(query = "", limit = 10) {
+  const q = safeText(query).toLowerCase();
+  const snap = await db.collection("accounts").limit(100).get();
+
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(a => {
+      const name = String(a.name || "").toLowerCase();
+      const cat = String(a.category || "").toLowerCase();
+      const desc = String(a.description || "").toLowerCase();
+      return name.includes(q) || cat.includes(q) || desc.includes(q);
+    })
+    .slice(0, limit);
+}
+
+export async function setPendingConfirmation(chatId, payload) {
+  await db.collection("bot_pending").doc(String(chatId)).set({
+    ...payload,
+    createdAt: nowIso()
   });
-  const id = "notif_" + Date.now();
-  await db.collection("notifications").doc(id).set({ id, title, body: body || "", accId: accId || null, createdAt: new Date().toISOString(), read: false });
-  if (!tokens.length) return { sent: 0, tokens: 0 };
-  const messaging = getMessaging();
-  let sent = 0, failed = 0;
-  for (let i = 0; i < tokens.length; i += 500) {
-    const batch = tokens.slice(i, i + 500);
-    const result = await messaging.sendEachForMulticast({
-      tokens: batch,
-      notification: { title, body: body || "" },
-      data: accId ? { accId: String(accId) } : {},
-      android: { priority: "high" },
-      apns: { payload: { aps: { sound: "default", badge: 1 } } },
-      webpush: { headers: { Urgency: "high" }, notification: { title, body: body || "", icon: LOGO } },
-    });
-    sent += result.successCount || 0;
-    failed += result.failureCount || 0;
-  }
-  return { sent, failed, tokens: tokens.length };
 }
 
-async function askGroq(messages) {
-  const key = process.env.GROQ_KEY;
-  if (!key) return null;
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({ model: "meta-llama/llama-4-maverick-17b-128e-instruct", messages, temperature: 0, max_tokens: 500 }),
+export async function getPendingConfirmation(chatId) {
+  const doc = await db.collection("bot_pending").doc(String(chatId)).get();
+  return doc.exists ? doc.data() : null;
+}
+
+export async function clearPendingConfirmation(chatId) {
+  await db.collection("bot_pending").doc(String(chatId)).delete().catch(() => {});
+}
+
+export async function saveChatMemory(chatId, role, content) {
+  await db.collection("bot_memory").add({
+    chatId: String(chatId),
+    role,
+    content: safeText(content),
+    createdAt: nowIso()
   });
-  if (!res.ok) throw new Error(`Groq error ${res.status}`);
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim() || null;
 }
 
-function normalizeArabic(s = "") {
-  return String(s).toLowerCase().replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").trim();
+export async function getRecentChatMemory(chatId, limit = 8) {
+  const snap = await db
+    .collection("bot_memory")
+    .where("chatId", "==", String(chatId))
+    .get();
+
+  return snap.docs
+    .map(d => d.data())
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    .slice(-limit)
+    .map(x => ({
+      role: x.role,
+      content: x.content
+    }));
 }
 
-function findAccount(accounts, text) {
-  const t = normalizeArabic(text);
-  return accounts.find(a => a.id === text || normalizeArabic(a.name || "").includes(t) || t.includes(normalizeArabic(a.name || "")));
-}
-function findOffer(offers, text) {
-  const t = normalizeArabic(text);
-  return offers.find(o => o.id === text || normalizeArabic(o.title || "").includes(t) || t.includes(normalizeArabic(o.title || "")));
-}
-function findUser(users, text) {
-  const t = normalizeArabic(text);
-  return users.find(u => u.uid === text || normalizeArabic(u.displayName || u.nickname || "").includes(t) || (u.email || "").toLowerCase().includes(String(text).toLowerCase()));
-}
-
-function regexExtract(text, label) {
-  const patterns = [new RegExp(label + "\\s*[:：-]?\\s*([^,\n]+)", "i"), new RegExp(label + "\s+(.+)$", "i")];
-  for (const p of patterns) {
-    const m = String(text).match(p);
-    if (m && m[1]) return m[1].trim();
-  }
-  return "";
-}
-
-async function parseIntent(text, context) {
-  const raw = String(text || "").trim();
-  const low = normalizeArabic(raw);
-
-  if (/stats|احصائ|إحصائ|numbers|ملخص/.test(raw)) return { type: "get_stats" };
-  if (/العروض.*(قريب|تنتهي)|expir/i.test(raw)) return { type: "list_expiring_offers" };
-  if (/ناقص|بدون صوره|missing/i.test(raw)) return { type: "find_incomplete_accounts" };
-  if (/ابعت|ارسل|send/.test(low) && /اشعار|notification|push/.test(low)) {
-    return { type: "send_push", title: regexExtract(raw, "عنوان") || regexExtract(raw, "title") || "📢 إشعار جديد", body: regexExtract(raw, "نص") || regexExtract(raw, "body") || raw.replace(/.*?(اشعار|notification)/i, "").trim() || "تابع الجديد على Rebranding" };
-  }
-
-  if (/(ضيف|اعمل|انشئ|create|add).*(يوزر|user)/.test(low)) {
-    return { type: "upsert_user", displayName: regexExtract(raw, "باسم") || regexExtract(raw, "name") || regexExtract(raw, "الاسم"), email: regexExtract(raw, "email") || regexExtract(raw, "الايميل") || regexExtract(raw, "الإيميل"), whatsapp: regexExtract(raw, "رقم") || regexExtract(raw, "واتساب") || regexExtract(raw, "whatsapp"), platform: regexExtract(raw, "platform") || "web" };
-  }
-  if (/(امسح|احذف|delete|remove).*(يوزر|user)/.test(low)) {
-    return { type: "delete_user", target: raw };
-  }
-
-  if (/(ضيف|اعمل|انشئ|create|add).*(عرض|offer)/.test(low)) {
-    return { type: "add_offer", title: regexExtract(raw, "عنوان") || regexExtract(raw, "اسم") || regexExtract(raw, "title"), accountHint: regexExtract(raw, "لاكونت") || regexExtract(raw, "للأكونت") || regexExtract(raw, "account"), description: regexExtract(raw, "وصف") || regexExtract(raw, "description"), expiryDate: regexExtract(raw, "ينتهي") || regexExtract(raw, "expiry") || regexExtract(raw, "exp") };
-  }
-  if (/(عدل|تعديل|edit|update).*(عرض|offer)/.test(low)) {
-    return { type: "edit_offer", target: raw, title: regexExtract(raw, "عنوان") || regexExtract(raw, "title"), expiryDate: regexExtract(raw, "ينتهي") || regexExtract(raw, "expiry"), description: regexExtract(raw, "وصف") || regexExtract(raw, "description") };
-  }
-  if (/(امسح|احذف|delete|remove).*(عرض|offer)/.test(low)) {
-    return { type: "delete_offer", target: raw };
-  }
-
-  if (/(ضيف|اعمل|انشئ|create|add).*(اكونت|اكاونت|account)/.test(low)) {
-    return { type: "add_account", name: regexExtract(raw, "باسم") || regexExtract(raw, "name") || regexExtract(raw, "الاسم"), category: regexExtract(raw, "تصنيف") || regexExtract(raw, "category"), description: regexExtract(raw, "وصف") || regexExtract(raw, "description"), status: /غير نشط/.test(low) ? "غير نشط" : "نشط" };
-  }
-  if (/(عدل|تعديل|edit|update).*(اكونت|اكاونت|account)/.test(low)) {
-    return { type: "edit_account", target: raw, changes: { status: /غير نشط/.test(low) ? "غير نشط" : (/نشط/.test(low) ? "نشط" : undefined), category: regexExtract(raw, "تصنيف") || regexExtract(raw, "category"), description: regexExtract(raw, "وصف") || regexExtract(raw, "description"), assignedTo: regexExtract(raw, "مسؤول") || regexExtract(raw, "assigned") } };
-  }
-  if (/(امسح|احذف|delete|remove).*(اكونت|اكاونت|account)/.test(low)) {
-    return { type: "delete_account", target: raw };
-  }
-
-  const accountsBrief = context.accounts.slice(0, 40).map(a => ({ id: a.id, name: a.name, category: a.category })).slice(0, 30);
-  const offersBrief = context.offers.slice(0, 30).map(o => ({ id: o.id, title: o.title, accountId: o.accountId })).slice(0, 20);
-  const usersBrief = context.users.slice(0, 30).map(u => ({ uid: u.uid, displayName: u.displayName, email: u.email })).slice(0, 20);
-  const prompt = `حوّل طلب الأدمن التالي إلى JSON فقط بدون شرح.\nالأنواع المسموحة: get_stats, list_expiring_offers, find_incomplete_accounts, send_push, add_account, edit_account, delete_account, add_offer, edit_offer, delete_offer, upsert_user, delete_user.\nاستخدم الحقول المناسبة فقط.\nلو في accountHint أو target استخدمه كنص للبحث.\nAccounts:${JSON.stringify(accountsBrief)}\nOffers:${JSON.stringify(offersBrief)}\nUsers:${JSON.stringify(usersBrief)}\nUser request: ${raw}`;
-  try {
-    const llm = await askGroq([{ role: "system", content: "أنت parser صارم. رجّع JSON فقط." }, { role: "user", content: prompt }]);
-    if (llm) {
-      const clean = llm.match(/\{[\s\S]*\}/)?.[0];
-      if (clean) return JSON.parse(clean);
+export async function executeAction(action, data = {}, meta = {}) {
+  switch (action) {
+    case "stats": {
+      const stats = await getStats();
+      await logAction(meta.source, meta.actorId, "stats", {});
+      return `📊 الإحصائيات:\n👥 Users: ${stats.users}\n🎯 Offers: ${stats.offers}\n🧾 Accounts: ${stats.accounts}`;
     }
-  } catch (e) {}
-  return { type: "unknown", raw };
-}
 
-async function logActivity(db, type, label, detail) {
-  try {
-    await db.collection("activity_log").doc(String(Date.now()) + Math.random().toString(16).slice(2, 6)).set({ type, label, detail, createdAt: new Date().toISOString() });
-  } catch (e) {}
-}
+    case "add_user": {
+      const user = await addUser(data);
+      await logAction(meta.source, meta.actorId, "add_user", user);
+      return `✅ تم إضافة المستخدم: ${user.name}${user.phone ? `\n📞 ${user.phone}` : ""}`;
+    }
 
-async function moveToTrash(db, kind, id, data) {
-  try {
-    await db.collection("trash").doc(`${kind}_${id}_${Date.now()}`).set({ kind, id, data, deletedAt: new Date().toISOString() });
-  } catch (e) {}
-}
+    case "list_users": {
+      const users = await listUsers(Number(data.limit) || 10);
+      if (!users.length) return "مفيش مستخدمين حاليًا.";
+      return "👥 المستخدمين:\n" + users.map((u, i) => `${i + 1}) ${u.name}${u.phone ? ` - ${u.phone}` : ""}`).join("\n");
+    }
 
-async function executeIntent(db, intent, context, source = "api") {
-  const { accounts, offers, users, today } = context;
-  switch (intent.type) {
-    case "get_stats": {
-      const activeOffers = offers.filter(o => !o.expiryDate || o.expiryDate >= today).length;
-      const activeAccounts = accounts.filter(a => (a.status || "نشط") === "نشط").length;
-      return `📊 الإحصائيات الحالية\n• الأكونتات: ${accounts.length}\n• النشط: ${activeAccounts}\n• العروض الفعالة: ${activeOffers}\n• المستخدمين: ${users.length}\n• الـ Tokens: ${context.tokensCount}`;
+    case "create_offer": {
+      const offer = await createOffer(data);
+      await logAction(meta.source, meta.actorId, "create_offer", offer);
+      return `🎯 تم إنشاء العرض: ${offer.title}${offer.discount ? `\n💸 الخصم: ${offer.discount}` : ""}`;
     }
-    case "list_expiring_offers": {
-      const near = offers.filter(o => o.expiryDate && o.expiryDate >= today).sort((a,b)=>String(a.expiryDate).localeCompare(String(b.expiryDate))).slice(0,8);
-      if (!near.length) return "✅ لا يوجد عروض منتهية أو قريبة الآن.";
-      return "⏰ أقرب العروض انتهاءً:\n" + near.map(o => `• ${o.title || o.id} — ${o.expiryDate}`).join("\n");
+
+    case "list_offers": {
+      const offers = await listOffers(Number(data.limit) || 10);
+      if (!offers.length) return "مفيش عروض حاليًا.";
+      return "🎯 العروض:\n" + offers.map((o, i) => `${i + 1}) ${o.title}${o.discount ? ` - ${o.discount}` : ""}`).join("\n");
     }
-    case "find_incomplete_accounts": {
-      const bad = accounts.filter(a => !a.avatar || !a.description || !(a.links || []).length).slice(0, 12);
-      if (!bad.length) return "✅ معظم الأكونتات مكتملة البيانات.";
-      return "🧩 أكونتات ناقصها بيانات:\n" + bad.map(a => `• ${a.name || a.id}${!a.avatar ? ' [بدون صورة]' : ''}${!a.description ? ' [بدون وصف]' : ''}${!(a.links || []).length ? ' [بدون لينكات]' : ''}`).join("\n");
-    }
-    case "send_push": {
-      const stats = await sendFCMPush(intent.title || "📢 إشعار جديد", intent.body || "تابع الجديد على Rebranding", intent.accId || null);
-      await logActivity(db, "send_push", `إرسال إشعار: ${intent.title || 'بدون عنوان'}`, source);
-      return `✅ تم إرسال الإشعار\nالعنوان: ${intent.title || '—'}\nتم الإرسال إلى: ${stats.sent}/${stats.tokens}`;
-    }
+
     case "add_account": {
-      if (!intent.name) return "⚠️ محتاج اسم الأكونت.";
-      const id = "acc_" + Date.now();
-      await db.collection("accounts").doc(id).set({ id, name: intent.name, category: intent.category || "عام", description: intent.description || "", status: intent.status || "نشط", avatar: "", coverImage: "", tags: [], links: [], extraReplies: [], galleryImages: [], trainedQA: [], fixedReply: "", timesReply: "", contactReply: "", pinned: false, joinedDate: today, updatedAt: new Date().toISOString() });
-      await logActivity(db, "add_account", `إضافة أكونت: ${intent.name}`, source);
-      return `✅ تم إضافة الأكونت: ${intent.name}`;
+      const acc = await addAccount(data);
+      await logAction(meta.source, meta.actorId, "add_account", acc);
+      return `🧾 تم إضافة الحساب: ${acc.name}`;
     }
-    case "edit_account": {
-      const acc = findAccount(accounts, intent.target || intent.accountHint || intent.name || "");
-      if (!acc) return "❌ مش لاقي الأكونت المطلوب تعديله.";
-      const changes = Object.fromEntries(Object.entries(intent.changes || {}).filter(([,v]) => v !== undefined && v !== ""));
-      if (!Object.keys(changes).length) return "⚠️ مفيش تعديلات واضحة على الأكونت.";
-      changes.updatedAt = new Date().toISOString();
-      await db.collection("accounts").doc(acc.id).set(changes, { merge: true });
-      await logActivity(db, "edit_account", `تعديل أكونت: ${acc.name || acc.id}`, source);
-      return `✅ تم تعديل الأكونت: ${acc.name || acc.id}`;
+
+    case "search_accounts": {
+      const results = await searchAccounts(data.query || "", Number(data.limit) || 10);
+      if (!results.length) return "ملقتش حسابات مطابقة.";
+      return "🔎 النتائج:\n" + results.map((a, i) => `${i + 1}) ${a.name}${a.category ? ` - ${a.category}` : ""}`).join("\n");
     }
-    case "delete_account": {
-      const acc = findAccount(accounts, intent.target || intent.accountHint || "");
-      if (!acc) return "❌ مش لاقي الأكونت المطلوب حذفه.";
-      await moveToTrash(db, "account", acc.id, acc);
-      await db.collection("accounts").doc(acc.id).delete();
-      await logActivity(db, "delete_account", `حذف أكونت: ${acc.name || acc.id}`, source);
-      return `🗑️ تم حذف الأكونت: ${acc.name || acc.id}`;
-    }
-    case "add_offer": {
-      const acc = findAccount(accounts, intent.accountHint || intent.target || "");
-      if (!acc) return "⚠️ محتاج تحدد الأكونت الخاص بالعرض بشكل أوضح.";
-      if (!intent.title) return "⚠️ محتاج عنوان العرض.";
-      const exp = intent.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(intent.expiryDate) ? intent.expiryDate : "";
-      const id = "offer_" + Date.now();
-      await db.collection("offers").doc(id).set({ id, accountId: acc.id, title: intent.title, description: intent.description || "", badge: intent.badge || "جديد", expiryDate: exp, updatedAt: new Date().toISOString() });
-      await logActivity(db, "add_offer", `إضافة عرض: ${intent.title}`, source);
-      return `✅ تم إضافة العرض: ${intent.title}\nللأكونت: ${acc.name}`;
-    }
-    case "edit_offer": {
-      const off = findOffer(offers, intent.target || intent.title || "");
-      if (!off) return "❌ مش لاقي العرض المطلوب تعديله.";
-      const changes = {};
-      if (intent.title) changes.title = intent.title;
-      if (intent.expiryDate) changes.expiryDate = intent.expiryDate;
-      if (intent.description) changes.description = intent.description;
-      if (!Object.keys(changes).length) return "⚠️ مفيش تعديلات واضحة على العرض.";
-      changes.updatedAt = new Date().toISOString();
-      await db.collection("offers").doc(off.id).set(changes, { merge: true });
-      await logActivity(db, "edit_offer", `تعديل عرض: ${off.title || off.id}`, source);
-      return `✅ تم تعديل العرض: ${off.title || off.id}`;
-    }
-    case "delete_offer": {
-      const off = findOffer(offers, intent.target || intent.title || "");
-      if (!off) return "❌ مش لاقي العرض المطلوب حذفه.";
-      await moveToTrash(db, "offer", off.id, off);
-      await db.collection("offers").doc(off.id).delete();
-      await logActivity(db, "delete_offer", `حذف عرض: ${off.title || off.id}`, source);
-      return `🗑️ تم حذف العرض: ${off.title || off.id}`;
-    }
-    case "upsert_user": {
-      if (!intent.displayName) return "⚠️ محتاج اسم اليوزر.";
-      const existing = findUser(users, intent.email || intent.displayName);
-      const uid = existing?.uid || ("user_" + Date.now());
-      const base = { displayName: intent.displayName, email: intent.email || existing?.email || "", whatsapp: intent.whatsapp || existing?.whatsapp || "", nickname: intent.nickname || existing?.nickname || "", platform: intent.platform || existing?.platform || "web", updatedAt: new Date().toISOString(), uid };
-      await db.collection("user_data").doc(uid).set({ displayName: base.displayName, email: base.email, whatsapp: base.whatsapp, nickname: base.nickname, updatedAt: base.updatedAt }, { merge: true });
-      await db.collection("fcm_tokens").doc(uid).set(base, { merge: true });
-      await logActivity(db, existing ? "edit_user" : "add_user", `${existing ? 'تعديل' : 'إضافة'} يوزر: ${intent.displayName}`, source);
-      return `✅ تم ${existing ? 'تعديل' : 'إضافة'} اليوزر: ${intent.displayName}`;
-    }
-    case "delete_user": {
-      const user = findUser(users, intent.target || intent.email || intent.displayName || "");
-      if (!user) return "❌ مش لاقي اليوزر المطلوب حذفه.";
-      await moveToTrash(db, "user", user.uid, user);
-      await Promise.allSettled([db.collection("user_data").doc(user.uid).delete(), db.collection("fcm_tokens").doc(user.uid).delete()]);
-      await logActivity(db, "delete_user", `حذف يوزر: ${user.displayName || user.uid}`, source);
-      return `🗑️ تم حذف اليوزر: ${user.displayName || user.uid}`;
-    }
+
     default:
-      return "❓ ما فهمتش الطلب بشكل كافي. جرّب تكتبه بشكل أوضح.";
+      return "مش لاقي تنفيذ مباشر للطلب ده حاليًا.";
   }
 }
-
-async function handleAdminText(text, source = "api") {
-  const db = getDB();
-  const context = await getContext(db);
-  const intent = await parseIntent(text, context);
-  let reply = "تمام، هراجع طلبك.";
-  const result = await executeIntent(db, intent, context, source);
-  if (intent.type === "unknown") reply = "مش واضح 100%، فممكن تكون النتيجة عامة.";
-  else if (intent.type === "get_stats") reply = "دي آخر الأرقام الحالية:";
-  else if (intent.type === "find_incomplete_accounts") reply = "لقيت الأكونتات الناقصة دي:";
-  else if (intent.type === "list_expiring_offers") reply = "دي أقرب العروض انتهاءً:";
-  else if (intent.type === "send_push") reply = "الإشعار اتجهز واتبعت.";
-  else reply = "تم التنفيذ.";
-  return { intent, reply, result };
-}
-
-module.exports = { getDB, getContext, sendFCMPush, handleAdminText, executeIntent };
