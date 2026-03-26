@@ -1,92 +1,59 @@
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json" }
-  });
-}
 
-async function tg(method, body) {
-  const token = process.env.TG_TOKEN;
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+const { getDB, handleAdminText } = require("../lib/core");
+
+const TG_TOKEN = process.env.TG_TOKEN;
+const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
+
+async function sendTG(chatId, text) {
+  if (!TG_TOKEN) throw new Error("TG_TOKEN missing");
+  await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
   });
-
-  return res.json();
 }
 
-function isAdmin(chatId) {
-  const admins = String(process.env.ADMIN_IDS || "")
-    .split(",")
-    .map(x => x.trim())
-    .filter(Boolean);
-
-  if (!admins.length) return true;
-  return admins.includes(String(chatId));
+async function handleReplyTraining(db, replyText, originalText, chatId) {
+  const idMatch = originalText.match(/\[ID:(uq_\d+)\]/);
+  if (!idMatch) return false;
+  const qId = idMatch[1];
+  const qDoc = await db.collection("unanswered_questions").doc(qId).get();
+  if (!qDoc.exists) return false;
+  const qData = qDoc.data();
+  await db.collection("unanswered_questions").doc(qId).update({ a: replyText, answeredAt: new Date().toISOString() });
+  await sendTG(chatId, `✅ تم حفظ الإجابة\nالأكونت: ${qData.accName || '—'}\nالسؤال: ${qData.q || '—'}\nالإجابة: ${replyText}`);
+  return true;
 }
 
-export default async function handler(request) {
-  if (request.method !== "POST") {
-    return jsonResponse({ ok: true });
+module.exports = async (req, res) => {
+  if (req.method !== "POST") return res.status(200).send("ok");
+  const { message } = req.body || {};
+  if (!message) return res.status(200).send("ok");
+
+  const chatId = String(message.chat?.id || "");
+  const text = String(message.text || "").trim();
+  if (!text) return res.status(200).send("ok");
+
+  if (ADMIN_IDS.length && !ADMIN_IDS.includes(chatId)) {
+    await sendTG(chatId, "⛔ غير مصرح ليك تستخدم البوت ده.");
+    return res.status(200).send("ok");
+  }
+
+  if (text === "/start" || text === "/help") {
+    await sendTG(chatId, "👋 أوامر سريعة:\n• ضيف يوزر باسم أحمد\n• اعمل عرض جديد للأكونت X\n• ابعت إشعار بعنوان ...\n• هات الإحصائيات\n• هات العروض اللي قربت تنتهي");
+    return res.status(200).send("ok");
   }
 
   try {
-    const body = await request.json();
-    const msg = body.message;
-
-    if (!msg?.chat?.id || !msg?.text) {
-      return jsonResponse({ ok: true });
+    const db = getDB();
+    if (message.reply_to_message && await handleReplyTraining(db, text, message.reply_to_message.text || "", chatId)) {
+      return res.status(200).send("ok");
     }
-
-    const chatId = msg.chat.id;
-    const text = msg.text;
-
-    if (!isAdmin(chatId)) {
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "❌ البوت ده خاص بالإدارة فقط."
-      });
-      return jsonResponse({ ok: true });
-    }
-
-    if (text === "/start") {
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text:
-          "🔥 البوت الذكي شغال\n\n" +
-          "أمثلة:\n" +
-          "- احصائيات\n" +
-          "- ضيف يوزر احمد 010\n" +
-          "- اعمل عرض 20% باسم رمضان\n" +
-          "- هات العروض\n" +
-          "- دور على حساب مطعم\n" +
-          "- ضيف حساب باسم خزين فئة مشويات"
-      });
-
-      return jsonResponse({ ok: true });
-    }
-
-    const aiRes = await fetch(`${process.env.APP_BASE_URL}/api/ai`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        source: "telegram",
-        chatId: String(chatId),
-        actorId: String(chatId),
-        message: text
-      })
-    });
-
-    const ai = await aiRes.json();
-
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: ai.reply || "تم."
-    });
-
-    return jsonResponse({ ok: true });
+    const data = await handleAdminText(text, "telegram");
+    await sendTG(chatId, `${data.reply}\n\n${data.result}`.trim());
   } catch (e) {
-    return jsonResponse({ ok: true });
+    console.error("webhook error", e);
+    await sendTG(chatId, "❌ حصل خطأ: " + e.message);
   }
-}
+  return res.status(200).send("ok");
+};
