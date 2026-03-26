@@ -1,219 +1,277 @@
+
 import admin from "firebase-admin";
 
-function getEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
-}
+const dbCache = { db: null };
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: getEnv("FIREBASE_PROJECT_ID"),
-      clientEmail: getEnv("FIREBASE_CLIENT_EMAIL"),
-      privateKey: getEnv("FIREBASE_PRIVATE_KEY").replace(/\\n/g, "\n")
-    })
-  });
-}
-
-const db = admin.firestore();
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function safeText(v, fallback = "") {
-  return typeof v === "string" ? v.trim() : fallback;
-}
-
-export async function logAction(source, actorId, action, data = {}) {
-  await db.collection("activity_log").add({
-    source,
-    actorId: String(actorId || ""),
-    action,
-    data,
-    createdAt: nowIso()
-  });
-}
-
-export async function getStats() {
-  const [usersSnap, offersSnap, accountsSnap] = await Promise.all([
-    db.collection("users").get().catch(() => ({ size: 0 })),
-    db.collection("offers").get().catch(() => ({ size: 0 })),
-    db.collection("accounts").get().catch(() => ({ size: 0 }))
-  ]);
-
-  return {
-    users: usersSnap.size || 0,
-    offers: offersSnap.size || 0,
-    accounts: accountsSnap.size || 0
-  };
-}
-
-export async function addUser(data = {}) {
-  const name = safeText(data.name, "بدون اسم");
-  const phone = safeText(data.phone);
-  const note = safeText(data.note);
-
-  const payload = {
-    name,
-    phone,
-    note,
-    createdAt: nowIso(),
-    updatedAt: nowIso()
-  };
-
-  const ref = await db.collection("users").add(payload);
-  return { id: ref.id, ...payload };
-}
-
-export async function listUsers(limit = 10) {
-  const snap = await db.collection("users").limit(limit).get();
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
-export async function createOffer(data = {}) {
-  const title = safeText(data.title || data.name, "عرض جديد");
-  const discount = safeText(data.discount);
-  const expiresAt = safeText(data.expiresAt);
-  const details = safeText(data.details);
-
-  const payload = {
-    title,
-    discount,
-    details,
-    expiresAt,
-    active: true,
-    createdAt: nowIso(),
-    updatedAt: nowIso()
-  };
-
-  const ref = await db.collection("offers").add(payload);
-  return { id: ref.id, ...payload };
-}
-
-export async function listOffers(limit = 10) {
-  const snap = await db.collection("offers").limit(limit).get();
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
-export async function addAccount(data = {}) {
-  const payload = {
-    name: safeText(data.name, "حساب جديد"),
-    category: safeText(data.category),
-    description: safeText(data.description),
-    image: safeText(data.image),
-    pinned: Boolean(data.pinned),
-    active: data.active !== false,
-    createdAt: nowIso(),
-    updatedAt: nowIso()
-  };
-
-  const ref = await db.collection("accounts").add(payload);
-  return { id: ref.id, ...payload };
-}
-
-export async function searchAccounts(query = "", limit = 10) {
-  const q = safeText(query).toLowerCase();
-  const snap = await db.collection("accounts").limit(100).get();
-
-  return snap.docs
-    .map(d => ({ id: d.id, ...d.data() }))
-    .filter(a => {
-      const name = String(a.name || "").toLowerCase();
-      const cat = String(a.category || "").toLowerCase();
-      const desc = String(a.description || "").toLowerCase();
-      return name.includes(q) || cat.includes(q) || desc.includes(q);
-    })
-    .slice(0, limit);
-}
-
-export async function setPendingConfirmation(chatId, payload) {
-  await db.collection("bot_pending").doc(String(chatId)).set({
-    ...payload,
-    createdAt: nowIso()
-  });
-}
-
-export async function getPendingConfirmation(chatId) {
-  const doc = await db.collection("bot_pending").doc(String(chatId)).get();
-  return doc.exists ? doc.data() : null;
-}
-
-export async function clearPendingConfirmation(chatId) {
-  await db.collection("bot_pending").doc(String(chatId)).delete().catch(() => {});
-}
-
-export async function saveChatMemory(chatId, role, content) {
-  await db.collection("bot_memory").add({
-    chatId: String(chatId),
-    role,
-    content: safeText(content),
-    createdAt: nowIso()
-  });
-}
-
-export async function getRecentChatMemory(chatId, limit = 8) {
-  const snap = await db
-    .collection("bot_memory")
-    .where("chatId", "==", String(chatId))
-    .get();
-
-  return snap.docs
-    .map(d => d.data())
-    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-    .slice(-limit)
-    .map(x => ({
-      role: x.role,
-      content: x.content
-    }));
-}
-
-export async function executeAction(action, data = {}, meta = {}) {
-  switch (action) {
-    case "stats": {
-      const stats = await getStats();
-      await logAction(meta.source, meta.actorId, "stats", {});
-      return `📊 الإحصائيات:\n👥 Users: ${stats.users}\n🎯 Offers: ${stats.offers}\n🧾 Accounts: ${stats.accounts}`;
-    }
-
-    case "add_user": {
-      const user = await addUser(data);
-      await logAction(meta.source, meta.actorId, "add_user", user);
-      return `✅ تم إضافة المستخدم: ${user.name}${user.phone ? `\n📞 ${user.phone}` : ""}`;
-    }
-
-    case "list_users": {
-      const users = await listUsers(Number(data.limit) || 10);
-      if (!users.length) return "مفيش مستخدمين حاليًا.";
-      return "👥 المستخدمين:\n" + users.map((u, i) => `${i + 1}) ${u.name}${u.phone ? ` - ${u.phone}` : ""}`).join("\n");
-    }
-
-    case "create_offer": {
-      const offer = await createOffer(data);
-      await logAction(meta.source, meta.actorId, "create_offer", offer);
-      return `🎯 تم إنشاء العرض: ${offer.title}${offer.discount ? `\n💸 الخصم: ${offer.discount}` : ""}`;
-    }
-
-    case "list_offers": {
-      const offers = await listOffers(Number(data.limit) || 10);
-      if (!offers.length) return "مفيش عروض حاليًا.";
-      return "🎯 العروض:\n" + offers.map((o, i) => `${i + 1}) ${o.title}${o.discount ? ` - ${o.discount}` : ""}`).join("\n");
-    }
-
-    case "add_account": {
-      const acc = await addAccount(data);
-      await logAction(meta.source, meta.actorId, "add_account", acc);
-      return `🧾 تم إضافة الحساب: ${acc.name}`;
-    }
-
-    case "search_accounts": {
-      const results = await searchAccounts(data.query || "", Number(data.limit) || 10);
-      if (!results.length) return "ملقتش حسابات مطابقة.";
-      return "🔎 النتائج:\n" + results.map((a, i) => `${i + 1}) ${a.name}${a.category ? ` - ${a.category}` : ""}`).join("\n");
-    }
-
-    default:
-      return "مش لاقي تنفيذ مباشر للطلب ده حاليًا.";
+function initFirebase() {
+  if (dbCache.db) return dbCache.db;
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: (process.env.FIREBASE_PRIVATE_KEY || "").replace(/\\n/g, "\n")
+      })
+    });
   }
+  dbCache.db = admin.firestore();
+  return dbCache.db;
+}
+
+export async function askGroq(messages) {
+  const key = process.env.GROQ_KEY;
+  if (!key) return '{"mode":"chat","reply":"حط GROQ_KEY في Environment Variables الأول."}';
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      temperature: 0.2,
+      messages
+    })
+  });
+  const data = await res.json();
+  return data?.choices?.[0]?.message?.content || '{"mode":"chat","reply":"مقدرتش أفهم الطلب."}';
+}
+
+export async function buildContext() {
+  const db = initFirebase();
+  const [accountsSnap, offersSnap, usersSnap, tokensSnap] = await Promise.all([
+    db.collection("accounts").get().catch(() => ({ docs: [] })),
+    db.collection("offers").get().catch(() => ({ docs: [] })),
+    db.collection("user_data").get().catch(() => ({ docs: [] })),
+    db.collection("fcm_tokens").get().catch(() => ({ size: 0 }))
+  ]);
+  return {
+    db,
+    today: new Date().toISOString().slice(0, 10),
+    accounts: (accountsSnap.docs || []).map(d => ({ id: d.id, ...d.data() })),
+    offers: (offersSnap.docs || []).map(d => ({ id: d.id, ...d.data() })),
+    users: (usersSnap.docs || []).map(d => ({ uid: d.id, ...d.data() })),
+    tokensCount: tokensSnap.size || 0
+  };
+}
+
+function regexExtract(raw, key) {
+  const patterns = [
+    new RegExp(`${key}\\s*[:：-]?\\s*([^،\n]+)`, 'i'),
+    new RegExp(`${key}\\s+([^،\n]+)`, 'i')
+  ];
+  for (const p of patterns) {
+    const m = String(raw || '').match(p);
+    if (m) return m[1].trim();
+  }
+  return '';
+}
+
+function findAccount(accounts, hint = "") {
+  const h = String(hint || '').trim().toLowerCase();
+  return accounts.find(a => String(a.id).toLowerCase() === h || String(a.name || '').toLowerCase().includes(h));
+}
+
+function findOffer(offers, hint = "") {
+  const h = String(hint || '').trim().toLowerCase();
+  return offers.find(o => String(o.id).toLowerCase() === h || String(o.title || '').toLowerCase().includes(h));
+}
+
+function findUser(users, hint = "") {
+  const h = String(hint || '').trim().toLowerCase();
+  return users.find(u => String(u.uid).toLowerCase() === h || String(u.displayName || '').toLowerCase().includes(h) || String(u.email || '').toLowerCase().includes(h));
+}
+
+export async function classifyIntent(raw, context) {
+  const low = String(raw || '').toLowerCase();
+  if (/(احصائيات|احصائيه|stats)/.test(low)) return { type: 'get_stats' };
+  if (/(العروض المنتهية|expiring offers|العروض القريبة)/.test(low)) return { type: 'list_expiring_offers' };
+  if (/(ناقص|incomplete).*(اكونت|account)/.test(low)) return { type: 'find_incomplete_accounts' };
+  if (/(ابعت|ارسل|send).*(اشعار|إشعار|notification)/.test(low)) return { type: 'send_push', title: regexExtract(raw, 'عنوان') || regexExtract(raw, 'title'), body: regexExtract(raw, 'رسالة') || regexExtract(raw, 'body') };
+  if (/(ضيف|اعمل|انشئ|create|add).*(يوزر|user)/.test(low)) return { type: 'upsert_user', displayName: regexExtract(raw, 'باسم') || regexExtract(raw, 'اسم') || regexExtract(raw, 'name'), email: regexExtract(raw, 'email') || regexExtract(raw, 'ايميل'), whatsapp: regexExtract(raw, 'واتساب') || regexExtract(raw, 'phone') };
+  if (/(امسح|احذف|delete|remove).*(يوزر|user)/.test(low)) return { type: 'delete_user', target: raw };
+  if (/(ضيف|اعمل|انشئ|create|add).*(عرض|offer)/.test(low)) return { type: 'add_offer', title: regexExtract(raw, 'عنوان') || regexExtract(raw, 'اسم') || regexExtract(raw, 'title'), accountHint: regexExtract(raw, 'لاكونت') || regexExtract(raw, 'للأكونت') || regexExtract(raw, 'account'), description: regexExtract(raw, 'وصف') || regexExtract(raw, 'description'), expiryDate: regexExtract(raw, 'ينتهي') || regexExtract(raw, 'expiry') || regexExtract(raw, 'exp') };
+  if (/(عدل|تعديل|edit|update).*(عرض|offer)/.test(low)) return { type: 'edit_offer', target: raw, title: regexExtract(raw, 'عنوان') || regexExtract(raw, 'title'), expiryDate: regexExtract(raw, 'ينتهي') || regexExtract(raw, 'expiry'), description: regexExtract(raw, 'وصف') || regexExtract(raw, 'description') };
+  if (/(امسح|احذف|delete|remove).*(عرض|offer)/.test(low)) return { type: 'delete_offer', target: raw };
+  if (/(ضيف|اعمل|انشئ|create|add).*(اكونت|اكاونت|account)/.test(low)) return { type: 'add_account', name: regexExtract(raw, 'باسم') || regexExtract(raw, 'name') || regexExtract(raw, 'الاسم'), category: regexExtract(raw, 'تصنيف') || regexExtract(raw, 'category'), description: regexExtract(raw, 'وصف') || regexExtract(raw, 'description'), status: /غير نشط/.test(low) ? 'غير نشط' : 'نشط' };
+  if (/(عدل|تعديل|edit|update).*(اكونت|اكاونت|account)/.test(low)) return { type: 'edit_account', target: raw, changes: { status: /غير نشط/.test(low) ? 'غير نشط' : (/نشط/.test(low) ? 'نشط' : undefined), category: regexExtract(raw, 'تصنيف') || regexExtract(raw, 'category'), description: regexExtract(raw, 'وصف') || regexExtract(raw, 'description') } };
+  if (/(امسح|احذف|delete|remove).*(اكونت|اكاونت|account)/.test(low)) return { type: 'delete_account', target: raw };
+  return { type: 'unknown', raw };
+}
+
+async function logActivity(db, type, label, detail) {
+  try {
+    await db.collection("activity_log").add({ type, label, detail, createdAt: new Date().toISOString() });
+  } catch {}
+}
+
+async function moveToTrash(db, kind, id, data) {
+  try {
+    await db.collection("trash").add({ kind, id, data, deletedAt: new Date().toISOString() });
+  } catch {}
+}
+
+async function sendFCMPush(title, body) {
+  const db = initFirebase();
+  const snap = await db.collection("fcm_tokens").get().catch(() => ({ docs: [] }));
+  const tokens = (snap.docs || []).map(d => d.data()?.token).filter(Boolean);
+  if (!tokens.length) return { sent: 0, tokens: 0 };
+  const response = await admin.messaging().sendEachForMulticast({
+    tokens,
+    notification: { title, body },
+    data: { title, body }
+  });
+  return { sent: response.successCount || 0, tokens: tokens.length };
+}
+
+export async function executeIntent(intent, context, source = 'api') {
+  const { db, accounts, offers, users, today } = context;
+  switch (intent.type) {
+    case 'get_stats': {
+      const activeOffers = offers.filter(o => !o.expiryDate || o.expiryDate >= today).length;
+      const activeAccounts = accounts.filter(a => (a.status || 'نشط') === 'نشط').length;
+      return `📊 الإحصائيات الحالية\n• الأكونتات: ${accounts.length}\n• النشط: ${activeAccounts}\n• العروض الفعالة: ${activeOffers}\n• المستخدمين: ${users.length}\n• الـ Tokens: ${context.tokensCount}`;
+    }
+    case 'list_expiring_offers': {
+      const near = offers.filter(o => o.expiryDate && o.expiryDate >= today).sort((a,b)=>String(a.expiryDate).localeCompare(String(b.expiryDate))).slice(0,8);
+      if (!near.length) return '✅ لا يوجد عروض منتهية أو قريبة الآن.';
+      return '⏰ أقرب العروض انتهاءً:\n' + near.map(o => `• ${o.title || o.id} — ${o.expiryDate}`).join('\n');
+    }
+    case 'find_incomplete_accounts': {
+      const bad = accounts.filter(a => !a.avatar || !a.description || !(a.links || []).length).slice(0,12);
+      if (!bad.length) return '✅ معظم الأكونتات مكتملة البيانات.';
+      return '🧩 أكونتات ناقصها بيانات:\n' + bad.map(a => `• ${a.name || a.id}${!a.avatar ? ' [بدون صورة]' : ''}${!a.description ? ' [بدون وصف]' : ''}${!(a.links || []).length ? ' [بدون لينكات]' : ''}`).join('\n');
+    }
+    case 'send_push': {
+      const stats = await sendFCMPush(intent.title || '📢 إشعار جديد', intent.body || 'تابع الجديد على Rebranding');
+      await logActivity(db, 'send_push', `إرسال إشعار: ${intent.title || 'بدون عنوان'}`, source);
+      return `✅ تم إرسال الإشعار\nالعنوان: ${intent.title || '—'}\nتم الإرسال إلى: ${stats.sent}/${stats.tokens}`;
+    }
+    case 'add_account': {
+      if (!intent.name) return '⚠️ محتاج اسم الأكونت.';
+      const id = 'acc_' + Date.now();
+      await db.collection('accounts').doc(id).set({ id, name: intent.name, category: intent.category || 'عام', description: intent.description || '', status: intent.status || 'نشط', avatar: '', coverImage: '', tags: [], links: [], extraReplies: [], galleryImages: [], trainedQA: [], fixedReply: '', timesReply: '', contactReply: '', pinned: false, joinedDate: today, updatedAt: new Date().toISOString() });
+      await logActivity(db, 'add_account', `إضافة أكونت: ${intent.name}`, source);
+      return `✅ تم إضافة الأكونت: ${intent.name}`;
+    }
+    case 'edit_account': {
+      const acc = findAccount(accounts, intent.target || intent.accountHint || intent.name || '');
+      if (!acc) return '❌ مش لاقي الأكونت المطلوب تعديله.';
+      const changes = Object.fromEntries(Object.entries(intent.changes || {}).filter(([,v]) => v !== undefined && v !== ''));
+      if (!Object.keys(changes).length) return '⚠️ مفيش تعديلات واضحة على الأكونت.';
+      changes.updatedAt = new Date().toISOString();
+      await db.collection('accounts').doc(acc.id).set(changes, { merge: true });
+      await logActivity(db, 'edit_account', `تعديل أكونت: ${acc.name || acc.id}`, source);
+      return `✅ تم تعديل الأكونت: ${acc.name || acc.id}`;
+    }
+    case 'delete_account': {
+      const acc = findAccount(accounts, intent.target || intent.accountHint || '');
+      if (!acc) return '❌ مش لاقي الأكونت المطلوب حذفه.';
+      await moveToTrash(db, 'account', acc.id, acc);
+      await db.collection('accounts').doc(acc.id).delete();
+      await logActivity(db, 'delete_account', `حذف أكونت: ${acc.name || acc.id}`, source);
+      return `🗑️ تم حذف الأكونت: ${acc.name || acc.id}`;
+    }
+    case 'add_offer': {
+      const acc = findAccount(accounts, intent.accountHint || intent.target || '');
+      if (!acc) return '⚠️ محتاج تحدد الأكونت الخاص بالعرض بشكل أوضح.';
+      if (!intent.title) return '⚠️ محتاج عنوان العرض.';
+      const exp = intent.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(intent.expiryDate) ? intent.expiryDate : '';
+      const id = 'offer_' + Date.now();
+      await db.collection('offers').doc(id).set({ id, accountId: acc.id, title: intent.title, description: intent.description || '', badge: intent.badge || 'جديد', expiryDate: exp, updatedAt: new Date().toISOString() });
+      await logActivity(db, 'add_offer', `إضافة عرض: ${intent.title}`, source);
+      return `✅ تم إضافة العرض: ${intent.title}\nللأكونت: ${acc.name}`;
+    }
+    case 'edit_offer': {
+      const off = findOffer(offers, intent.target || intent.title || '');
+      if (!off) return '❌ مش لاقي العرض المطلوب تعديله.';
+      const changes = {};
+      if (intent.title) changes.title = intent.title;
+      if (intent.expiryDate) changes.expiryDate = intent.expiryDate;
+      if (intent.description) changes.description = intent.description;
+      if (!Object.keys(changes).length) return '⚠️ مفيش تعديلات واضحة على العرض.';
+      changes.updatedAt = new Date().toISOString();
+      await db.collection('offers').doc(off.id).set(changes, { merge: true });
+      await logActivity(db, 'edit_offer', `تعديل عرض: ${off.title || off.id}`, source);
+      return `✅ تم تعديل العرض: ${off.title || off.id}`;
+    }
+    case 'delete_offer': {
+      const off = findOffer(offers, intent.target || intent.title || '');
+      if (!off) return '❌ مش لاقي العرض المطلوب حذفه.';
+      await moveToTrash(db, 'offer', off.id, off);
+      await db.collection('offers').doc(off.id).delete();
+      await logActivity(db, 'delete_offer', `حذف عرض: ${off.title || off.id}`, source);
+      return `🗑️ تم حذف العرض: ${off.title || off.id}`;
+    }
+    case 'upsert_user': {
+      if (!intent.displayName) return '⚠️ محتاج اسم اليوزر.';
+      const existing = findUser(users, intent.email || intent.displayName);
+      const uid = existing?.uid || ('user_' + Date.now());
+      const base = { displayName: intent.displayName, email: intent.email || existing?.email || '', whatsapp: intent.whatsapp || existing?.whatsapp || '', nickname: intent.nickname || existing?.nickname || '', platform: intent.platform || existing?.platform || 'web', updatedAt: new Date().toISOString(), uid };
+      await db.collection('user_data').doc(uid).set({ displayName: base.displayName, email: base.email, whatsapp: base.whatsapp, nickname: base.nickname, updatedAt: base.updatedAt }, { merge: true });
+      await db.collection('fcm_tokens').doc(uid).set(base, { merge: true });
+      await logActivity(db, existing ? 'edit_user' : 'add_user', `${existing ? 'تعديل' : 'إضافة'} يوزر: ${intent.displayName}`, source);
+      return `✅ تم ${existing ? 'تعديل' : 'إضافة'} اليوزر: ${intent.displayName}`;
+    }
+    case 'delete_user': {
+      const u = findUser(users, intent.target || intent.email || intent.displayName || '');
+      if (!u) return '❌ مش لاقي اليوزر المطلوب.';
+      await moveToTrash(db, 'user', u.uid, u);
+      await db.collection('user_data').doc(u.uid).delete().catch(() => {});
+      await db.collection('fcm_tokens').doc(u.uid).delete().catch(() => {});
+      await logActivity(db, 'delete_user', `حذف يوزر: ${u.displayName || u.uid}`, source);
+      return `🗑️ تم حذف اليوزر: ${u.displayName || u.uid}`;
+    }
+    default: {
+      const parsed = await classifyIntent(JSON.stringify(intent), context);
+      if (parsed.type !== 'unknown') return executeIntent(parsed, context, source);
+      return 'مش لاقي تنفيذ مباشر للطلب ده حاليًا.';
+    }
+  }
+}
+
+export async function saveSupportTicket({ sessionId, actorId, question, source, customerName = '', customerContact = '' }) {
+  const db = initFirebase();
+  const ref = await db.collection('support_messages').add({
+    sessionId,
+    actorId,
+    question,
+    source,
+    customerName,
+    customerContact,
+    status: 'pending',
+    answer: '',
+    answeredBy: '',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  return { id: ref.id };
+}
+
+export async function listPendingSupport(limit = 10) {
+  const db = initFirebase();
+  const snap = await db.collection('support_messages').where('status', '==', 'pending').get().catch(() => ({ docs: [] }));
+  const docs = (snap.docs || []).map(d => ({ id: d.id, ...d.data() })).slice(0, limit);
+  if (!docs.length) return '✅ مفيش أسئلة معلقة حاليًا.';
+  return '📩 الأسئلة المعلقة:\n' + docs.map((d, i) => `${i+1}) [${d.id}] ${d.question}${d.customerName ? ` — ${d.customerName}` : ''}`).join('\n');
+}
+
+export async function answerSupportTicket(ticketId, answer, actorId = 'admin') {
+  const db = initFirebase();
+  const ref = db.collection('support_messages').doc(ticketId);
+  const snap = await ref.get();
+  if (!snap.exists) return '❌ مش لاقي التذكرة دي.';
+  await ref.set({ status: 'answered', answer, answeredBy: actorId, updatedAt: new Date().toISOString() }, { merge: true });
+  return `✅ تم حفظ الرد على التذكرة ${ticketId}`;
+}
+
+export async function saveMemory(sessionId, role, content) {
+  const db = initFirebase();
+  await db.collection('ai_memory').add({ sessionId: String(sessionId), role, content: String(content || ''), createdAt: new Date().toISOString() });
+}
+
+export async function getRecentMemory(sessionId, limit = 8) {
+  const db = initFirebase();
+  const snap = await db.collection('ai_memory').where('sessionId', '==', String(sessionId)).get().catch(() => ({ docs: [] }));
+  return (snap.docs || []).map(d => d.data()).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).slice(-limit).map(x => ({ role: x.role, content: x.content }));
 }
