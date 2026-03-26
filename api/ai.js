@@ -1,7 +1,13 @@
 export default async function handler(req, res) {
   try {
+    if (!process.env.GROQ_KEY) {
+      return res.status(200).json({
+        reply: "GROQ_KEY missing"
+      });
+    }
+
     const body = req.body || {};
-    const message = body.message || "";
+    const message = body.message || "قول hello";
 
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -14,7 +20,7 @@ export default async function handler(req, res) {
         messages: [
           {
             role: "system",
-            content: "انت مساعد ذكي بيرد بشكل بسيط وواضح بالعربي."
+            content: "رد باختصار بالعربي."
           },
           {
             role: "user",
@@ -26,15 +32,20 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    const reply =
-      data?.choices?.[0]?.message?.content ||
-      "في مشكلة في الرد";
+    if (!response.ok) {
+      return res.status(200).json({
+        reply: "Groq request failed",
+        details: data
+      });
+    }
+
+    const reply = data?.choices?.[0]?.message?.content || "no reply";
 
     return res.status(200).json({ reply });
-
   } catch (e) {
     return res.status(200).json({
-      reply: "في مشكلة في الـ AI"
+      reply: "AI crash",
+      error: String(e?.message || e)
     });
   }
 }
