@@ -3,6 +3,19 @@ import admin from "firebase-admin";
 
 const dbCache = { db: null };
 
+
+function egyptParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(date);
+  const map = {};
+  parts.forEach(p => { if (p.type !== 'literal') map[p.type] = p.value; });
+  return map;
+}
+
+function egyptToday() {
+  const p = egyptParts();
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
 function initFirebase() {
   if (dbCache.db) return dbCache.db;
   if (!admin.apps.length) {
@@ -47,7 +60,7 @@ export async function buildContext() {
   ]);
   return {
     db,
-    today: new Date().toISOString().slice(0, 10),
+    today: egyptToday(),
     accounts: (accountsSnap.docs || []).map(d => ({ id: d.id, ...d.data() })),
     offers: (offersSnap.docs || []).map(d => ({ id: d.id, ...d.data() })),
     users: (usersSnap.docs || []).map(d => ({ uid: d.id, ...d.data() })),
