@@ -304,3 +304,134 @@ export async function getRecentMemory(sessionId, limit = 8) {
   const snap = await db.collection('ai_memory').where('sessionId', '==', String(sessionId)).get().catch(() => ({ docs: [] }));
   return (snap.docs || []).map(d => d.data()).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).slice(-limit).map(x => ({ role: x.role, content: x.content }));
 }
+
+
+export async function trackVisit({ sessionId = '', actorId = '', page = 'home', itemId = '', itemType = 'page' } = {}) {
+  const db = initFirebase();
+  if (!db) return { ok: false, reason: 'missing_firebase' };
+  await db.collection('site_visits').add({
+    sessionId: String(sessionId || actorId || 'guest'),
+    actorId: String(actorId || sessionId || 'guest'),
+    page: String(page || 'home'),
+    itemId: String(itemId || ''),
+    itemType: String(itemType || 'page'),
+    createdAt: new Date().toISOString()
+  });
+  return { ok: true };
+}
+
+export async function addRating({ sessionId = '', actorId = '', accountId = '', rating = 5, comment = '' } = {}) {
+  const db = initFirebase();
+  if (!db) return '⚠️ ربط Firebase ناقص، فمش هقدر أحفظ التقييم دلوقتي.';
+  const value = Math.max(1, Math.min(5, Number(rating) || 5));
+  await db.collection('ratings').add({
+    sessionId: String(sessionId || actorId || 'guest'),
+    actorId: String(actorId || sessionId || 'guest'),
+    accountId: String(accountId || 'general'),
+    rating: value,
+    comment: String(comment || ''),
+    createdAt: new Date().toISOString()
+  });
+  return `⭐ تم حفظ تقييم ${value}/5${accountId ? ` للحساب ${accountId}` : ''}`;
+}
+
+export async function addComment({ sessionId = '', actorId = '', accountId = '', text = '', author = '' } = {}) {
+  const db = initFirebase();
+  if (!db) return '⚠️ ربط Firebase ناقص، فمش هقدر أحفظ التعليق دلوقتي.';
+  if (!String(text || '').trim()) return '⚠️ محتاج نص التعليق.';
+  await db.collection('comments').add({
+    sessionId: String(sessionId || actorId || 'guest'),
+    actorId: String(actorId || sessionId || 'guest'),
+    accountId: String(accountId || 'general'),
+    text: String(text || ''),
+    author: String(author || 'زائر'),
+    createdAt: new Date().toISOString(),
+    status: 'published'
+  });
+  return '💬 تم حفظ التعليق.';
+}
+
+export async function saveSiteUserProfile({ sessionId = '', name = '', email = '' } = {}) {
+  const db = initFirebase();
+  if (!db) return '⚠️ ربط Firebase ناقص، فمش هقدر أحفظ الحساب دلوقتي.';
+  const uid = String(sessionId || email || ('site_' + Date.now()));
+  await db.collection('site_users').doc(uid).set({
+    uid,
+    name: String(name || 'مستخدم'),
+    email: String(email || ''),
+    updatedAt: new Date().toISOString(),
+    createdAt: new Date().toISOString()
+  }, { merge: true });
+  return `👤 تم حفظ بيانات المستخدم: ${name || email || uid}`;
+}
+
+export async function getRecommendations({ sessionId = '', limit = 5 } = {}) {
+  const db = initFirebase();
+  const context = await buildContext();
+  if (!db || !context.accounts.length) return [];
+  const visitsSnap = await db.collection('site_visits').where('sessionId', '==', String(sessionId || 'guest')).get().catch(() => ({ docs: [] }));
+  const commentsSnap = await db.collection('comments').get().catch(() => ({ docs: [] }));
+  const ratingsSnap = await db.collection('ratings').get().catch(() => ({ docs: [] }));
+  const visited = (visitsSnap.docs || []).map(d => d.data());
+  const weights = {};
+  const byId = {};
+  context.accounts.forEach(a => { byId[a.id] = a; });
+  visited.forEach(v => {
+    const acc = byId[v.itemId] || context.accounts.find(a => String(a.name || '').includes(String(v.itemId || '')));
+    const cat = String(acc?.category || '').trim();
+    if (cat) weights[cat] = (weights[cat] || 0) + 3;
+  });
+  const ratingMap = {};
+  (ratingsSnap.docs || []).forEach(d => {
+    const r = d.data();
+    ratingMap[r.accountId] = ratingMap[r.accountId] || { sum: 0, count: 0 };
+    ratingMap[r.accountId].sum += Number(r.rating) || 0;
+    ratingMap[r.accountId].count += 1;
+  });
+  const commented = new Set((commentsSnap.docs || []).map(d => d.data().accountId).filter(Boolean));
+  const scored = context.accounts.map(a => {
+    const cat = String(a.category || '');
+    const rating = ratingMap[a.id]?.count ? (ratingMap[a.id].sum / ratingMap[a.id].count) : 0;
+    return {
+      ...a,
+      score: (weights[cat] || 0) + rating * 2 + (commented.has(a.id) ? 1 : 0) + (a.pinned ? 1 : 0)
+    };
+  }).sort((a,b) => b.score - a.score).slice(0, Number(limit) || 5);
+  return scored;
+}
+
+export async function getReportsSummary() {
+  const db = initFirebase();
+  const context = await buildContext();
+  if (!db) {
+    return {
+      accounts: context.accounts.length,
+      offers: context.offers.length,
+      users: context.users.length,
+      ratings: 0,
+      comments: 0,
+      visits: 0,
+      pendingSupport: 0,
+      averageRating: 0
+    };
+  }
+  const [ratingsSnap, commentsSnap, visitsSnap, supportSnap] = await Promise.all([
+    db.collection('ratings').get().catch(() => ({ docs: [], size: 0 })),
+    db.collection('comments').get().catch(() => ({ docs: [], size: 0 })),
+    db.collection('site_visits').get().catch(() => ({ docs: [], size: 0 })),
+    db.collection('support_messages').where('status', '==', 'pending').get().catch(() => ({ docs: [], size: 0 }))
+  ]);
+  let avg = 0;
+  const nums = (ratingsSnap.docs || []).map(d => Number(d.data().rating) || 0).filter(Boolean);
+  if (nums.length) avg = nums.reduce((a,b) => a+b, 0) / nums.length;
+  return {
+    accounts: context.accounts.length,
+    offers: context.offers.length,
+    users: context.users.length,
+    ratings: ratingsSnap.size || 0,
+    comments: commentsSnap.size || 0,
+    visits: visitsSnap.size || 0,
+    pendingSupport: supportSnap.size || 0,
+    averageRating: Number(avg.toFixed(1))
+  };
+}
