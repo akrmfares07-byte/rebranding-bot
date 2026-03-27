@@ -16,8 +16,13 @@ function egyptToday() {
   return `${p.year}-${p.month}-${p.day}`;
 }
 
+function hasFirebaseConfig() {
+  return !!(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
+}
+
 function initFirebase() {
   if (dbCache.db) return dbCache.db;
+  if (!hasFirebaseConfig()) return null;
   if (!admin.apps.length) {
     admin.initializeApp({
       credential: admin.credential.cert({
@@ -52,6 +57,9 @@ export async function askGroq(messages) {
 
 export async function buildContext() {
   const db = initFirebase();
+  if (!db) {
+    return { db: null, today: egyptToday(), accounts: [], offers: [], users: [], tokensCount: 0, missingFirebase: true };
+  }
   const [accountsSnap, offersSnap, usersSnap, tokensSnap] = await Promise.all([
     db.collection("accounts").get().catch(() => ({ docs: [] })),
     db.collection("offers").get().catch(() => ({ docs: [] })),
@@ -139,6 +147,9 @@ async function sendFCMPush(title, body) {
 
 export async function executeIntent(intent, context, source = 'api') {
   const { db, accounts, offers, users, today } = context;
+  if (!db && !['get_stats','list_expiring_offers','find_incomplete_accounts'].includes(intent.type)) {
+    return '⚠️ ربط Firebase ناقص، فالتنفيذ المباشر مش متاح لحد ما تضيف Environment Variables كاملة.';
+  }
   switch (intent.type) {
     case 'get_stats': {
       const activeOffers = offers.filter(o => !o.expiryDate || o.expiryDate >= today).length;
@@ -245,6 +256,7 @@ export async function executeIntent(intent, context, source = 'api') {
 
 export async function saveSupportTicket({ sessionId, actorId, question, source, customerName = '', customerContact = '' }) {
   const db = initFirebase();
+  if (!db) return { id: 'local-only' };
   const ref = await db.collection('support_messages').add({
     sessionId,
     actorId,
@@ -263,6 +275,7 @@ export async function saveSupportTicket({ sessionId, actorId, question, source, 
 
 export async function listPendingSupport(limit = 10) {
   const db = initFirebase();
+  if (!db) return '⚠️ ربط Firebase ناقص، فمش هقدر أجيب الأسئلة المعلقة دلوقتي.';
   const snap = await db.collection('support_messages').where('status', '==', 'pending').get().catch(() => ({ docs: [] }));
   const docs = (snap.docs || []).map(d => ({ id: d.id, ...d.data() })).slice(0, limit);
   if (!docs.length) return '✅ مفيش أسئلة معلقة حاليًا.';
@@ -271,6 +284,7 @@ export async function listPendingSupport(limit = 10) {
 
 export async function answerSupportTicket(ticketId, answer, actorId = 'admin') {
   const db = initFirebase();
+  if (!db) return '⚠️ ربط Firebase ناقص، فمش هقدر أحفظ الرد دلوقتي.';
   const ref = db.collection('support_messages').doc(ticketId);
   const snap = await ref.get();
   if (!snap.exists) return '❌ مش لاقي التذكرة دي.';
@@ -280,11 +294,13 @@ export async function answerSupportTicket(ticketId, answer, actorId = 'admin') {
 
 export async function saveMemory(sessionId, role, content) {
   const db = initFirebase();
+  if (!db) return;
   await db.collection('ai_memory').add({ sessionId: String(sessionId), role, content: String(content || ''), createdAt: new Date().toISOString() });
 }
 
 export async function getRecentMemory(sessionId, limit = 8) {
   const db = initFirebase();
+  if (!db) return [];
   const snap = await db.collection('ai_memory').where('sessionId', '==', String(sessionId)).get().catch(() => ({ docs: [] }));
   return (snap.docs || []).map(d => d.data()).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).slice(-limit).map(x => ({ role: x.role, content: x.content }));
 }
