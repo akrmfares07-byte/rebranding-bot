@@ -1,136 +1,116 @@
-// api/cron.js — Vercel cron job
-const { initializeApp, getApps } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
-const { getMessaging } = require("firebase-admin/messaging");
-const { credential } = require("firebase-admin");
+import admin from 'firebase-admin';
 
-const LOGO = "https://res.cloudinary.com/diepkkeyu/image/upload/v1773517119/404042723_763352762472137_4889753537613967821_n_p3hhjh.jpg";
+const LOGO = 'https://res.cloudinary.com/diepkkeyu/image/upload/v1773517119/404042723_763352762472137_4889753537613967821_n_p3hhjh.jpg';
 
-function getDB() {
-  if (!getApps().length) {
-    initializeApp({
-      credential: credential.cert({
+function getEgyptNow() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Cairo' }));
+}
+
+function getEgyptParts() {
+  const now = getEgyptNow();
+  return {
+    hour: now.getHours(),
+    minute: now.getMinutes(),
+    dateKey: now.toISOString().slice(0, 10),
+    iso: now.toISOString(),
+  };
+}
+
+function hasFirebaseConfig() {
+  return !!(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
+}
+
+function getDb() {
+  if (!hasFirebaseConfig()) return null;
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+        privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
       }),
     });
   }
-  return getFirestore();
+  return admin.firestore();
 }
 
 async function sendToAll(db, title, body) {
-  // 1. Save to Firestore notifications
-  const id = "notif_" + Date.now();
-  await db.collection("notifications").doc(id).set({
-    id, title, body: body || "",
+  const notifId = 'notif_' + Date.now();
+  await db.collection('notifications').doc(notifId).set({
+    id: notifId,
+    title,
+    body,
     createdAt: new Date().toISOString(),
-    read: false
+    read: false,
   });
 
-  // 2. Send FCM push to all tokens
-  const snap = await db.collection("fcm_tokens").get();
-  const tokens = [];
-  snap.forEach(doc => {
-    const data = doc.data();
-    if (data.token && typeof data.token === "string" && data.token.length > 20) {
-      tokens.push(data.token);
-    }
-  });
+  const tokenSnap = await db.collection('fcm_tokens').get();
+  const tokens = tokenSnap.docs.map(d => d.data()?.token).filter(t => typeof t === 'string' && t.length > 20);
+  if (!tokens.length) return { sent: 0, tokens: 0 };
 
-  if (tokens.length === 0) return { sent: 0 };
-
-  const messaging = getMessaging();
+  const messaging = admin.messaging();
   let sent = 0;
-  const deletePromises = [];
-
   for (let i = 0; i < tokens.length; i += 500) {
     const batch = tokens.slice(i, i + 500);
     const result = await messaging.sendEachForMulticast({
       tokens: batch,
-      notification: { title, body: body || "" },
-      android: { priority: "high" },
-      apns: { payload: { aps: { sound: "default", badge: 1 } } },
+      notification: { title, body },
+      android: { priority: 'high' },
+      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
       webpush: {
-        headers: { Urgency: "high" },
-        notification: { title, body: body || "", icon: LOGO }
-      }
+        headers: { Urgency: 'high' },
+        notification: { title, body, icon: LOGO },
+      },
     });
-
     sent += result.successCount || 0;
-
-    // Clean expired tokens
-    if (result.responses) {
-      result.responses.forEach((resp, idx) => {
-        if (!resp.success && resp.error) {
-          const code = resp.error.code;
-          if (
-            code === "messaging/registration-token-not-registered" ||
-            code === "messaging/invalid-registration-token"
-          ) {
-            const badToken = batch[idx];
-            snap.forEach(doc => {
-              if (doc.data().token === badToken) {
-                deletePromises.push(db.collection("fcm_tokens").doc(doc.id).delete());
-              }
-            });
-          }
-        }
-      });
-    }
   }
-
-  if (deletePromises.length > 0) await Promise.allSettled(deletePromises);
-
   return { sent, tokens: tokens.length };
 }
 
-module.exports = async (req, res) => {
-  const type = req.query.type;
+async function alreadyRan(db, key) {
+  const ref = db.collection('cron_runs').doc(key);
+  const snap = await ref.get();
+  if (snap.exists) return true;
+  await ref.set({ key, createdAt: new Date().toISOString() });
+  return false;
+}
 
+export default async function handler(req, res) {
   try {
-    const db = getDB();
+    const db = getDb();
+    if (!db) return res.status(200).json({ ok: true, skipped: true, reason: 'Missing Firebase env' });
 
-    if (type === "basma1") {
-      // ⏰ 6 المغرب — تذكير البصمة الأولى
-      const result = await sendToAll(db,
-        "⏰ متنساش البصمة!",
-        "الساعة 6 المغرب — سجّل حضورك دلوقتي 🕕"
-      );
-      return res.status(200).json({ ok: true, type, ...result });
+    const { hour, minute, dateKey, iso } = getEgyptParts();
+    const slot = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    const result = { ok: true, egyptTime: iso, slot, fired: [] };
+
+    const jobs = [
+      {
+        key: `basma1-${dateKey}`,
+        match: hour === 18 && minute === 0,
+        title: '⏰ متنساش البصمة!',
+        body: 'الساعة 6:00 مساءً بتوقيت مصر — سجّل حضورك دلوقتي 🕕',
+      },
+      {
+        key: `basma2-${dateKey}`,
+        match: hour === 18 && minute === 15,
+        title: '⚠️ أوعى تكون نسيت البصمة!',
+        body: 'الساعة 6:15 مساءً بتوقيت مصر — لسه وقت تسجل حضورك 🔔',
+      },
+    ];
+
+    for (const job of jobs) {
+      if (!job.match) continue;
+      if (await alreadyRan(db, job.key)) {
+        result.fired.push({ key: job.key, skipped: 'already_ran' });
+        continue;
+      }
+      const sendResult = await sendToAll(db, job.title, job.body);
+      result.fired.push({ key: job.key, ...sendResult });
     }
 
-    if (type === "basma2") {
-      // ⏰ 6:15 المغرب — تذكير ثاني
-      const result = await sendToAll(db,
-        "⚠️ أوعي تكون نسيت البصمة!",
-        "الساعة 6:15 — لسه وقت تسجل حضورك 🔔"
-      );
-      return res.status(200).json({ ok: true, type, ...result });
-    }
-
-    if (type === "evening") {
-      // إشعار المساء
-      const result = await sendToAll(db,
-        "🌙 مساء الخير",
-        "تابع العروض والأكونتات الجديدة على Rebranding"
-      );
-      return res.status(200).json({ ok: true, type, ...result });
-    }
-
-    if (type === "dawn") {
-      // إشعار الفجر
-      const result = await sendToAll(db,
-        "🌅 صباح الخير",
-        "ابدأ يومك بمراجعة أكونتاتك على Rebranding"
-      );
-      return res.status(200).json({ ok: true, type, ...result });
-    }
-
-    return res.status(400).json({ error: "Unknown type: " + type });
-
+    return res.status(200).json(result);
   } catch (e) {
-    console.error("cron error:", e.message);
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
-};
+}
