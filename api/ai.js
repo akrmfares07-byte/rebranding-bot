@@ -9,7 +9,7 @@ import {
   getRecentMemory,
   saveMemory,
   askGroq
-} from "../lib/core.js";
+, trackVisit, addRating, addComment, saveSiteUserProfile, getRecommendations, getReportsSummary} from "../lib/core.js";
 
 function setCors(res){
   res.setHeader("Access-Control-Allow-Origin","*");
@@ -107,6 +107,12 @@ export default async function handler(req,res){
     const sessionId=String(body.sessionId||body.chatId||actorId||Date.now());
     const supportTicketId=String(body.supportTicketId||'').trim();
 
+
+    if (body.event === 'visit') {
+      await trackVisit({ sessionId, actorId, page: body.page || 'home', itemId: body.itemId || '', itemType: body.itemType || 'page' });
+      return res.status(200).json({ ok: true, tracked: true });
+    }
+
     if(!message) return res.status(400).json({ok:false,reply:'ابعت رسالة الأول.'});
 
     const context = await buildContext();
@@ -121,6 +127,38 @@ export default async function handler(req,res){
     if (source === 'website_bot') {
       let reply='';
       let escalated=false;
+
+      if (/(رشح|اقترح|recommend)/i.test(message)) {
+        const recs = await getRecommendations({ sessionId, limit: 5 });
+        const reply = recs.length ? '✨ ترشيحات مناسبة ليك:\n' + recs.map((r,i)=>`${i+1}) ${r.name || r.id}${r.category ? ` — ${r.category}` : ''}`).join('\n') : 'محتاج بيانات أكتر شوية علشان أرشح لك بشكل أدق.';
+        await saveMemory(sessionId,'user',message);
+        await saveMemory(sessionId,'assistant',reply);
+        return res.status(200).json({ok:true,reply,mode:'chat',recommendations:recs});
+      }
+      if (/(قيم|تقييم|rate)/i.test(message)) {
+        const m = message.match(/(\d(?:\.\d)?)/);
+        const rating = m ? Number(m[1]) : 5;
+        const acc = (message.match(/(?:حساب|اكونت|أكونت)\s+([^\n،]+)/i)||[])[1] || '';
+        const reply = await addRating({ sessionId, actorId, accountId: acc.trim(), rating, comment: body.comment || '' });
+        await saveMemory(sessionId,'user',message);
+        await saveMemory(sessionId,'assistant',reply);
+        return res.status(200).json({ok:true,reply,mode:'chat'});
+      }
+      if (/(تعليق|comment)/i.test(message)) {
+        const acc = (message.match(/(?:حساب|اكونت|أكونت)\s+([^\n،]+)/i)||[])[1] || '';
+        const cleaned = message.replace(/^(?:ضيف\s*)?(?:تعليق|comment)\s*/i,'').trim();
+        const reply = await addComment({ sessionId, actorId, accountId: acc.trim(), text: cleaned || body.comment || message, author: body.customerName || 'زائر' });
+        await saveMemory(sessionId,'user',message);
+        await saveMemory(sessionId,'assistant',reply);
+        return res.status(200).json({ok:true,reply,mode:'chat'});
+      }
+      if (/(سجلني|اعمل حساب|create account|signup|register)/i.test(message) && (body.customerName || body.customerEmail)) {
+        const reply = await saveSiteUserProfile({ sessionId, name: body.customerName || '', email: body.customerEmail || '' });
+        await saveMemory(sessionId,'user',message);
+        await saveMemory(sessionId,'assistant',reply);
+        return res.status(200).json({ok:true,reply,mode:'chat'});
+      }
+
       try{
         const raw=await askGroq([{role:'system',content:websitePrompt(context)},{role:'user',content:message}]);
         const plan=extractJson(raw);
@@ -151,7 +189,19 @@ export default async function handler(req,res){
     let reply='';
     let performed=false;
 
-    if (/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/i.test(message)) {
+    if (/(التقارير|لوحة التقارير|reports|report)/i.test(message)) {
+      const s = await getReportsSummary();
+      reply = `📈 لوحة التقارير
+• الزيارات: ${s.visits}
+• التقييمات: ${s.ratings}
+• متوسط التقييم: ${s.averageRating}/5
+• التعليقات: ${s.comments}
+• الأسئلة المعلقة: ${s.pendingSupport}
+• الأكونتات: ${s.accounts}
+• العروض: ${s.offers}
+• المستخدمين: ${s.users}`;
+      performed = true;
+    } else if (/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/i.test(message)) {
       reply = await listPendingSupport();
       performed = true;
     } else {
