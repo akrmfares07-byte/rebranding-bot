@@ -11,133 +11,188 @@ import {
   askGroq
 } from "../lib/core.js";
 
-const CORS_HEADERS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
-
-
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS_HEADERS, "content-type": "application/json; charset=utf-8" }
-  });
+function setCors(res){
+  res.setHeader("Access-Control-Allow-Origin","*");
+  res.setHeader("Access-Control-Allow-Headers","Content-Type");
+  res.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS");
 }
 
-function adminChatPrompt() {
+function adminChatPrompt(context){
   return `أنت مساعد إداري ذكي لنظام Rebranding.
-- افهم الطلبات الحرة بالعربية أو الإنجليزية.
-- لو الطلب إداري وممكن تنفيذه، رجّع JSON فقط بالشكل:
-{"mode":"intent","intent":{...}}
-- لو الطلب سؤال عادي أو دردشة، رجّع JSON فقط بالشكل:
-{"mode":"chat","reply":"..."}
-- لو الطلب عن تذاكر الدعم المعلقة، استخدم الأنواع:
-  get_pending_support, answer_support_ticket
-- لو الطلب عن الإحصائيات استخدم get_stats
-- لو الطلب عن المستخدمين/العروض/الأكونتات استخدم نفس الأنواع المتاحة في النظام.
-- لو محتاج تفاصيل ناقصة قلها في reply بدل التنفيذ.
-- الردود تكون عربية واضحة ومختصرة.
-`;}
+ارجع JSON فقط لو قدرت تحدد تنفيذ.
+الصيغة:
+{"mode":"intent","intent":{"type":"..."}} أو {"mode":"chat","reply":"..."}
+الأنواع المتاحة:
+get_stats
+list_expiring_offers
+find_incomplete_accounts
+send_push
+upsert_user
+delete_user
+add_offer
+edit_offer
+delete_offer
+add_account
+edit_account
+delete_account
 
-function websitePrompt() {
+قواعد:
+- لو السؤال عن "الأسئلة المعلقة" استخدم chat فقط ودع النظام يتعامل معها.
+- لو البيانات ناقصة قل ذلك في reply بدل تنفيذ ناقص.
+- استخدم العربية.
+ملخص السياق:
+accounts=${context.accounts.length}
+offers=${context.offers.length}
+users=${context.users.length}`;
+}
+
+function websitePrompt(context){
+  const accs = context.accounts.slice(0,20).map(a=>({name:a.name,category:a.category,description:a.description}));
+  const offs = context.offers.slice(0,20).map(o=>({title:o.title,description:o.description,expiryDate:o.expiryDate}));
   return `أنت بوت خدمة عملاء لموقع Rebranding.
-- لا تنفذ أوامر إدارية أبدًا.
-- جاوب فقط من المعلومات العامة المتاحة: العروض، الأكونتات، المساعدة، طريقة التواصل.
-- لو السؤال خارج المعرفة أو يحتاج تدخل بشري، رجّع JSON فقط:
+ممنوع تمامًا تنفذ أوامر إدارية أو تفتح الداشبورد.
+جاوب فقط من البيانات المتاحة.
+لو مش عارف الإجابة أو السؤال يحتاج تدخل بشري، ارجع JSON فقط:
 {"mode":"escalate","reply":"..."}
-- لو تقدر تجاوب، رجّع JSON فقط:
+ولو تعرف تجاوب ارجع:
 {"mode":"chat","reply":"..."}
-- الرد يكون مهذب جدًا وبالعربية المصرية.
-`;}
+بيانات الحسابات: ${JSON.stringify(accs)}
+بيانات العروض: ${JSON.stringify(offs)}`;
+}
 
 function extractJson(text) {
+  try { return JSON.parse(String(text||"").trim()); } catch {}
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) throw new Error("No JSON");
   return JSON.parse(m[0]);
 }
 
-export default async function handler(req) {
-  try {
-    if (req.method === "OPTIONS") {
-      return new Response(null, { status: 200, headers: CORS_HEADERS });
+function ruleBasedReply(message, source, context){
+  const text=String(message||'').trim();
+  const low=text.toLowerCase();
+
+  if(source==='website_bot'){
+    if (/(عرض|عروض|خصم)/.test(text)) {
+      const active = context.offers.filter(o => !o.expiryDate || o.expiryDate >= context.today).slice(0,5);
+      if (active.length) return '🎯 العروض الحالية:\n' + active.map(o=>`• ${o.title || 'عرض'}${o.description ? ' — '+o.description : ''}`).join('\n');
+      return 'حاليًا مفيش عروض واضحة في البيانات.';
     }
-
-    if (req.method === "GET") {
-      return json({ ok: true, message: "AI route is working" });
+    if (/(حساب|اكونت|أكونت|براند|brand)/.test(text)) {
+      const sample = context.accounts.slice(0,5);
+      if (sample.length) return '🧾 أمثلة من الحسابات المتاحة:\n' + sample.map(a=>`• ${a.name || a.id}${a.category ? ' — '+a.category : ''}`).join('\n');
+      return 'مفيش حسابات ظاهرة في البيانات الحالية.';
     }
+    return 'محتاج أتأكد من سؤالك أكتر. اكتب اسم الأكونت أو نوع الخدمة، ولو السؤال خارج البيانات الحالية هيتحول للإدارة.';
+  }
 
-    if (req.method !== "POST") {
-      return json({ ok: false, error: "Method not allowed" }, 405);
-    }
+  if(/(احصائيات|احصائيه|stats)/.test(low)) {
+    const activeOffers = context.offers.filter(o => !o.expiryDate || o.expiryDate >= context.today).length;
+    return `📊 الإحصائيات الحالية\n• الأكونتات: ${context.accounts.length}\n• العروض الفعالة: ${activeOffers}\n• المستخدمين: ${context.users.length}`;
+  }
+  if(/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/.test(low)) return null;
+  return 'أنا جاهز أساعدك. اكتب الطلب بشكل أوضح، مثل: ضيف يوزر باسم أحمد، أو هات الإحصائيات.';
+}
 
-    const body = await req.json();
-    const message = String(body.message || "").trim();
-    const source = String(body.source || "admin_chat");
-    const actorId = String(body.actorId || body.chatId || "unknown");
-    const sessionId = String(body.sessionId || body.chatId || actorId || Date.now());
-    const supportTicketId = String(body.supportTicketId || "").trim();
+export default async function handler(req,res){
+  setCors(res);
+  if(req.method==='OPTIONS') return res.status(200).end();
+  if(req.method==='GET') return res.status(200).json({ok:true,message:'AI route alive'});
+  if(req.method!=='POST') return res.status(405).json({ok:false,error:'Method not allowed'});
 
-    if (!message) return json({ ok: false, reply: "ابعت رسالة الأول." }, 400);
+  try{
+    const body=req.body || {};
+    const message=String(body.message||'').trim();
+    const source=String(body.source||'admin_chat');
+    const actorId=String(body.actorId||body.chatId||'unknown');
+    const sessionId=String(body.sessionId||body.chatId||actorId||Date.now());
+    const supportTicketId=String(body.supportTicketId||'').trim();
+
+    if(!message) return res.status(400).json({ok:false,reply:'ابعت رسالة الأول.'});
 
     const context = await buildContext();
-    const memory = await getRecentMemory(sessionId);
 
-    let plan;
-    if (source === "website_bot") {
-      const prompt = `${websitePrompt()}\n\nالسياق المختصر:\naccounts=${JSON.stringify(context.accounts.slice(0,15).map(a => ({name:a.name,category:a.category,description:a.description})))}\noffers=${JSON.stringify(context.offers.slice(0,15).map(o => ({title:o.title,description:o.description,expiryDate:o.expiryDate})))}\n\nرسالة العميل: ${message}`;
-      const raw = await askGroq([{ role: 'system', content: websitePrompt() }, ...memory, { role: 'user', content: prompt }]);
-      plan = extractJson(raw);
+    if (supportTicketId) {
+      const reply = await answerSupportTicket(supportTicketId, message, actorId);
+      await saveMemory(sessionId,'user',message);
+      await saveMemory(sessionId,'assistant',reply);
+      return res.status(200).json({ok:true,reply,performed:true});
+    }
 
-      if (plan.mode === 'escalate') {
-        const ticket = await saveSupportTicket({
-          sessionId,
-          actorId,
-          question: message,
-          source,
-          customerName: body.customerName || "",
-          customerContact: body.customerContact || ""
-        });
-        const reply = plan.reply || "محتاج أتأكد من التفاصيل دي، فهحول سؤالك للإدارة وهيتم الرد عليك قريب.";
-        await saveMemory(sessionId, 'user', message);
-        await saveMemory(sessionId, 'assistant', reply);
-        return json({ ok: true, reply, escalated: true, ticketId: ticket.id });
+    if (source === 'website_bot') {
+      let reply='';
+      let escalated=false;
+      try{
+        const raw=await askGroq([{role:'system',content:websitePrompt(context)},{role:'user',content:message}]);
+        const plan=extractJson(raw);
+        if(plan.mode==='escalate'){
+          const ticket = await saveSupportTicket({
+            sessionId,
+            actorId,
+            question: message,
+            source,
+            customerName: body.customerName || '',
+            customerContact: body.customerContact || ''
+          });
+          reply = plan.reply || 'هحوّل سؤالك للإدارة وهيتم الرد عليك قريب.';
+          escalated = true;
+          await saveMemory(sessionId,'user',message);
+          await saveMemory(sessionId,'assistant',reply);
+          return res.status(200).json({ok:true,reply,escalated,ticketId:ticket.id});
+        }
+        reply = plan.reply || ruleBasedReply(message, source, context);
+      }catch(e){
+        reply = ruleBasedReply(message, source, context);
       }
-
-      const reply = plan.reply || "أقدر أساعدك في العروض والحسابات المتاحة أو أوصلك بالدعم.";
-      await saveMemory(sessionId, 'user', message);
-      await saveMemory(sessionId, 'assistant', reply);
-      return json({ ok: true, reply, mode: 'chat' });
+      await saveMemory(sessionId,'user',message);
+      await saveMemory(sessionId,'assistant',reply);
+      return res.status(200).json({ok:true,reply,mode:'chat'});
     }
 
-    // Admin chat / telegram / dashboard
-    const raw = await askGroq([{ role: 'system', content: adminChatPrompt() }, ...memory, { role: 'user', content: message }]);
-    try {
-      plan = extractJson(raw);
-    } catch {
-      plan = null;
-    }
+    let reply='';
+    let performed=false;
 
-    let reply = "تمام.";
-    let performed = false;
-
-    if (supportTicketId && message) {
-      reply = await answerSupportTicket(supportTicketId, message, actorId);
-      performed = true;
-    } else if (plan?.mode === 'intent' && plan.intent) {
-      reply = await executeIntent(plan.intent, context, source);
-      performed = true;
-    } else if (/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/i.test(message)) {
+    if (/(الاسئلة المعلقة|الأسئلة المعلقة|pending|support)/i.test(message)) {
       reply = await listPendingSupport();
       performed = true;
-    } else if (plan?.mode === 'chat' && plan.reply) {
-      reply = plan.reply;
     } else {
-      reply = raw || "مش واضح 100%، اكتب الطلب بشكل أوضح.";
+      const memory = await getRecentMemory(sessionId);
+      try{
+        const raw=await askGroq([{role:'system',content:adminChatPrompt(context)}, ...memory, {role:'user',content:message}]);
+        const plan=extractJson(raw);
+        if(plan?.mode==='intent' && plan.intent){
+          reply = await executeIntent(plan.intent, context, source);
+          performed = true;
+        } else if(plan?.mode==='chat' && plan.reply){
+          reply = plan.reply;
+        }
+      }catch(e){
+        reply = '';
+      }
+
+      if(!reply){
+        try{
+          const intent = await classifyIntent(message, context);
+          if(intent.type && intent.type !== 'unknown'){
+            reply = await executeIntent(intent, context, source);
+            performed = true;
+          }
+        }catch(e){}
+      }
+
+      if(!reply){
+        reply = ruleBasedReply(message, source, context) || 'مش واضح 100%، اكتب الطلب بشكل أوضح.';
+      }
     }
 
-    await saveMemory(sessionId, 'user', message);
-    await saveMemory(sessionId, 'assistant', reply);
+    await saveMemory(sessionId,'user',message);
+    await saveMemory(sessionId,'assistant',reply);
 
-    return json({ ok: true, reply, performed });
-  } catch (e) {
-    return json({ ok: true, reply: "في مشكلة بسيطة في التنفيذ. راجع الإعدادات أو جرّب تاني.", error: String(e.message || e) });
+    return res.status(200).json({ok:true,reply,performed,source,missingFirebase:!!context.missingFirebase});
+  }catch(e){
+    return res.status(200).json({
+      ok:true,
+      reply:'في مشكلة بسيطة في البوت، لكن الواجهة شغالة. جرّب تاني خلال لحظة.',
+      error:String(e?.message||e)
+    });
   }
 }
